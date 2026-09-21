@@ -10,7 +10,7 @@ import time
 
 
 # =========================================================
-# CENTRAL PARK LOCATION
+# CENTRAL PARK
 # =========================================================
 
 LAT = 40.77898
@@ -18,11 +18,13 @@ LON = -73.96925
 
 TIMEZONE = "America/New_York"
 
-UA = "CentralParkWeather/5.0"
+UA = "CentralParkWeather/6.0"
+
+EASTERN = ZoneInfo(TIMEZONE)
 
 
 # =========================================================
-# HTTP JSON
+# HTTP / JSON
 # =========================================================
 
 def get_json(url):
@@ -55,32 +57,78 @@ def round_temp(value):
     return round(float(value), 1)
 
 
-def format_time(value):
+# =========================================================
+# TIME HELPERS
+# =========================================================
+
+def parse_datetime(value):
 
     if not value:
         return None
 
     try:
 
-        if value.endswith("Z"):
-            dt = datetime.fromisoformat(
-                value.replace("Z", "+00:00")
-            )
-        else:
-            dt = datetime.fromisoformat(value)
+        value = value.replace(
+            "Z",
+            "+00:00"
+        )
+
+        dt = datetime.fromisoformat(
+            value
+        )
 
         if dt.tzinfo is None:
+
             dt = dt.replace(
-                tzinfo=ZoneInfo(TIMEZONE)
+                tzinfo=EASTERN
             )
 
-        return dt.astimezone(
-            ZoneInfo(TIMEZONE)
-        ).isoformat()
+        return dt
 
     except Exception:
 
-        return value
+        return None
+
+
+def local_hour_key(value):
+
+    """
+    Converts any provider timestamp into
+    the same New York local hourly key.
+
+    Example:
+
+    2026-09-21 18:00
+
+    All providers will use the same key.
+    """
+
+    dt = parse_datetime(value)
+
+    if dt is None:
+        return None
+
+    dt = dt.astimezone(
+        EASTERN
+    )
+
+    return dt.strftime(
+        "%Y-%m-%d %H:00"
+    )
+
+
+def display_time(value):
+
+    dt = parse_datetime(value)
+
+    if dt is None:
+        return "--"
+
+    return dt.astimezone(
+        EASTERN
+    ).strftime(
+        "%-I:%M %p"
+    )
 
 
 # =========================================================
@@ -95,20 +143,20 @@ def get_nws():
 
     properties = point["properties"]
 
-    forecast_url = properties["forecastHourly"]
-    observation_stations_url = properties["observationStations"]
-
     forecast = get_json(
-        forecast_url
+        properties["forecastHourly"]
     )
 
     stations = get_json(
-        observation_stations_url
+        properties["observationStations"]
     )
 
     station = None
 
-    for feature in stations.get("features", []):
+    for feature in stations.get(
+        "features",
+        []
+    ):
 
         station_id = (
             feature
@@ -134,13 +182,22 @@ def get_nws():
         "/observations/latest"
     )["properties"]
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(
+        timezone.utc
+    )
 
-    start = now - timedelta(hours=6)
+    start = now - timedelta(
+        hours=6
+    )
 
     params = urlencode({
-        "start": start.isoformat(),
-        "end": now.isoformat()
+
+        "start":
+            start.isoformat(),
+
+        "end":
+            now.isoformat()
+
     })
 
     history = get_json(
@@ -158,7 +215,10 @@ def get_nws():
             current,
 
         "history":
-            history.get("features", [])
+            history.get(
+                "features",
+                []
+            )
 
     }
 
@@ -219,6 +279,7 @@ def get_weatherapi():
     )
 
     if not key:
+
         return None
 
     params = urlencode({
@@ -226,7 +287,6 @@ def get_weatherapi():
         "key":
             key,
 
-        # Exact Central Park coordinates
         "q":
             f"{LAT},{LON}",
 
@@ -279,12 +339,19 @@ def get_nws_current(nws):
     temp_f = None
 
     if temp_c is not None:
-        temp_f = c_to_f(temp_c)
+
+        temp_f = c_to_f(
+            temp_c
+        )
 
     wind_mph = None
 
     if wind_ms is not None:
-        wind_mph = float(wind_ms) * 2.236936
+
+        wind_mph = (
+            float(wind_ms)
+            * 2.236936
+        )
 
     return {
 
@@ -298,10 +365,14 @@ def get_nws_current(nws):
             round_temp(wind_mph),
 
         "description":
-            obs.get("textDescription"),
+            obs.get(
+                "textDescription"
+            ),
 
         "time":
-            obs.get("timestamp"),
+            obs.get(
+                "timestamp"
+            ),
 
         "station":
             "KNYC"
@@ -313,9 +384,12 @@ def get_nws_current(nws):
 # OPEN-METEO CURRENT
 # =========================================================
 
-def get_open_meteo_current(open_meteo):
+def get_open_meteo_current(
+    open_meteo
+):
 
     if not open_meteo:
+
         return None
 
     current = open_meteo.get(
@@ -323,31 +397,33 @@ def get_open_meteo_current(open_meteo):
         {}
     )
 
-    temperature = current.get(
-        "temperature_2m"
-    )
-
-    humidity = current.get(
-        "relative_humidity_2m"
-    )
-
-    wind = current.get(
-        "wind_speed_10m"
-    )
-
     return {
 
         "temperatureF":
-            round_temp(temperature),
+            round_temp(
+                current.get(
+                    "temperature_2m"
+                )
+            ),
 
         "humidity":
-            round_temp(humidity),
+            round_temp(
+                current.get(
+                    "relative_humidity_2m"
+                )
+            ),
 
         "windMph":
-            round_temp(wind),
+            round_temp(
+                current.get(
+                    "wind_speed_10m"
+                )
+            ),
 
         "time":
-            current.get("time")
+            current.get(
+                "time"
+            )
 
     }
 
@@ -356,9 +432,12 @@ def get_open_meteo_current(open_meteo):
 # WEATHERAPI CURRENT
 # =========================================================
 
-def get_weatherapi_current(weatherapi):
+def get_weatherapi_current(
+    weatherapi
+):
 
     if not weatherapi:
+
         return None
 
     current = weatherapi.get(
@@ -366,32 +445,42 @@ def get_weatherapi_current(weatherapi):
         {}
     )
 
+    condition = (
+        current
+        .get("condition", {})
+        .get("text")
+    )
+
     return {
 
         "temperatureF":
             round_temp(
-                current.get("temp_f")
+                current.get(
+                    "temp_f"
+                )
             ),
 
         "humidity":
             round_temp(
-                current.get("humidity")
+                current.get(
+                    "humidity"
+                )
             ),
 
         "windMph":
             round_temp(
-                current.get("wind_mph")
+                current.get(
+                    "wind_mph"
+                )
             ),
 
         "description":
-            (
-                current
-                .get("condition", {})
-                .get("text")
-            ),
+            condition,
 
         "time":
-            current.get("last_updated")
+            current.get(
+                "last_updated"
+            )
 
     }
 
@@ -401,62 +490,70 @@ def get_weatherapi_current(weatherapi):
 # =========================================================
 
 def build_current_consensus(
-    nws_current,
-    open_meteo_current,
-    weatherapi_current
+    nws,
+    open_meteo,
+    weatherapi
 ):
 
     sources = {}
 
     if (
-        nws_current
-        and nws_current.get("temperatureF") is not None
+        nws
+        and nws.get(
+            "temperatureF"
+        ) is not None
     ):
 
         sources["NWS"] = (
-            nws_current["temperatureF"]
+            nws["temperatureF"]
         )
 
     if (
-        open_meteo_current
-        and open_meteo_current.get("temperatureF")
-        is not None
+        open_meteo
+        and open_meteo.get(
+            "temperatureF"
+        ) is not None
     ):
 
         sources["Open-Meteo"] = (
-            open_meteo_current["temperatureF"]
+            open_meteo[
+                "temperatureF"
+            ]
         )
 
     if (
-        weatherapi_current
-        and weatherapi_current.get("temperatureF")
-        is not None
+        weatherapi
+        and weatherapi.get(
+            "temperatureF"
+        ) is not None
     ):
 
         sources["WeatherAPI"] = (
-            weatherapi_current["temperatureF"]
+            weatherapi[
+                "temperatureF"
+            ]
         )
 
     values = list(
         sources.values()
     )
 
-    if not values:
+    if values:
 
-        consensus = None
-
-    else:
-
-        # Median gives us the middle value
-        # when the sources disagree.
         consensus = statistics.median(
             values
         )
 
+    else:
+
+        consensus = None
+
     return {
 
         "temperatureF":
-            round_temp(consensus),
+            round_temp(
+                consensus
+            ),
 
         "sources":
             sources,
@@ -496,6 +593,7 @@ def six_hour_extremes(nws):
         )
 
         if value is None:
+
             continue
 
         observations.append({
@@ -512,9 +610,11 @@ def six_hour_extremes(nws):
 
         return {
 
-            "high": None,
+            "high":
+                None,
 
-            "low": None
+            "low":
+                None
 
         }
 
@@ -560,10 +660,10 @@ def six_hour_extremes(nws):
 
 
 # =========================================================
-# FORECAST CONSENSUS
+# FORECAST
 # =========================================================
 
-def build_forecast_consensus(
+def build_forecast(
     nws,
     open_meteo,
     weatherapi
@@ -571,9 +671,10 @@ def build_forecast_consensus(
 
     hourly = {}
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # NWS
-    # -----------------------------------------------------
+    # =====================================================
 
     for period in nws.get(
         "forecast",
@@ -592,37 +693,28 @@ def build_forecast_consensus(
             timestamp is None
             or temperature is None
         ):
+
             continue
 
-        try:
+        key = local_hour_key(
+            timestamp
+        )
 
-            dt = datetime.fromisoformat(
-                timestamp.replace(
-                    "Z",
-                    "+00:00"
-                )
-            )
+        if key is None:
 
-            key = dt.astimezone(
-                timezone.utc
-            ).strftime(
-                "%Y-%m-%dT%H:00:00Z"
-            )
+            continue
 
-            hourly.setdefault(
-                key,
-                {}
-            )["NWS"] = float(
-                temperature
-            )
-
-        except Exception:
-            pass
+        hourly.setdefault(
+            key,
+            {}
+        )["NWS"] = float(
+            temperature
+        )
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # OPEN-METEO
-    # -----------------------------------------------------
+    # =====================================================
 
     if open_meteo:
 
@@ -641,59 +733,44 @@ def build_forecast_consensus(
             )
         )
 
-        eastern = ZoneInfo(
-            TIMEZONE
-        )
-
         for local_time, temperature in zip(
             times,
             temperatures
         ):
 
             if temperature is None:
+
                 continue
 
-            try:
+            key = local_hour_key(
+                local_time
+            )
 
-                dt = datetime.fromisoformat(
-                    local_time
-                )
+            if key is None:
 
-                dt = dt.replace(
-                    tzinfo=eastern
-                )
+                continue
 
-                key = dt.astimezone(
-                    timezone.utc
-                ).strftime(
-                    "%Y-%m-%dT%H:00:00Z"
-                )
-
-                hourly.setdefault(
-                    key,
-                    {}
-                )["Open-Meteo"] = float(
-                    temperature
-                )
-
-            except Exception:
-                pass
+            hourly.setdefault(
+                key,
+                {}
+            )["Open-Meteo"] = float(
+                temperature
+            )
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # WEATHERAPI
-    # -----------------------------------------------------
+    # =====================================================
 
     if weatherapi:
-
-        eastern = ZoneInfo(
-            TIMEZONE
-        )
 
         forecast_days = (
             weatherapi
             .get("forecast", {})
-            .get("forecastday", [])
+            .get(
+                "forecastday",
+                []
+            )
         )
 
         for day in forecast_days:
@@ -715,44 +792,36 @@ def build_forecast_consensus(
                     local_time is None
                     or temperature is None
                 ):
+
                     continue
 
-                try:
+                key = local_hour_key(
+                    local_time
+                )
 
-                    dt = datetime.fromisoformat(
-                        local_time
-                    )
+                if key is None:
 
-                    dt = dt.replace(
-                        tzinfo=eastern
-                    )
+                    continue
 
-                    key = dt.astimezone(
-                        timezone.utc
-                    ).strftime(
-                        "%Y-%m-%dT%H:00:00Z"
-                    )
-
-                    hourly.setdefault(
-                        key,
-                        {}
-                    )["WeatherAPI"] = float(
-                        temperature
-                    )
-
-                except Exception:
-                    pass
+                hourly.setdefault(
+                    key,
+                    {}
+                )["WeatherAPI"] = float(
+                    temperature
+                )
 
 
-    # -----------------------------------------------------
-    # MEDIAN CONSENSUS
-    # -----------------------------------------------------
+    # =====================================================
+    # BUILD CONSENSUS
+    # =====================================================
 
     result = []
 
-    for timestamp, sources in hourly.items():
+
+    for key, sources in hourly.items():
 
         if not sources:
+
             continue
 
         values = list(
@@ -763,55 +832,65 @@ def build_forecast_consensus(
             values
         )
 
-        # NWS forecast description
+
+        # -------------------------------------------------
+        # Description
+        # -------------------------------------------------
+
         description = "Consensus"
+
 
         for period in nws.get(
             "forecast",
             []
         ):
 
-            period_start = period.get(
-                "startTime"
+            if (
+                local_hour_key(
+                    period.get(
+                        "startTime"
+                    )
+                )
+                == key
+            ):
+
+                description = period.get(
+                    "shortForecast",
+                    "Consensus"
+                )
+
+                break
+
+
+        # -------------------------------------------------
+        # Convert local key to ISO time
+        # -------------------------------------------------
+
+        try:
+
+            local_dt = datetime.strptime(
+                key,
+                "%Y-%m-%d %H:00"
             )
 
-            if not period_start:
-                continue
+            local_dt = local_dt.replace(
+                tzinfo=EASTERN
+            )
 
-            try:
+            iso_time = local_dt.isoformat()
 
-                dt = datetime.fromisoformat(
-                    period_start.replace(
-                        "Z",
-                        "+00:00"
-                    )
-                )
+        except Exception:
 
-                key = dt.astimezone(
-                    timezone.utc
-                ).strftime(
-                    "%Y-%m-%dT%H:00:00Z"
-                )
+            continue
 
-                if key == timestamp:
-
-                    description = period.get(
-                        "shortForecast",
-                        "Consensus"
-                    )
-
-                    break
-
-            except Exception:
-                pass
 
         result.append({
 
             "time":
-                timestamp,
+                iso_time,
 
             "startTime":
-                timestamp,
+                iso_time,
 
             "temperature":
                 round_temp(
@@ -833,7 +912,9 @@ def build_forecast_consensus(
             "sources": {
 
                 name:
-                    round_temp(value)
+                    round_temp(
+                        value
+                    )
 
                 for name, value
                 in sources.items()
@@ -845,16 +926,66 @@ def build_forecast_consensus(
 
         })
 
+
+    # =====================================================
+    # SORT BY TIME
+    # =====================================================
+
     result.sort(
         key=lambda x:
             x["time"]
     )
 
-    return result[:24]
+
+    # =====================================================
+    # ONLY FUTURE HOURS
+    # =====================================================
+
+    now = datetime.now(
+        EASTERN
+    )
+
+    # Next complete hour.
+    next_hour = (
+        now.replace(
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+        + timedelta(hours=1)
+    )
+
+
+    filtered = []
+
+
+    for item in result:
+
+        dt = parse_datetime(
+            item["time"]
+        )
+
+        if dt is None:
+
+            continue
+
+        dt = dt.astimezone(
+            EASTERN
+        )
+
+        if dt >= next_hour:
+
+            filtered.append(
+                item
+            )
+
+
+    # Exactly the next 24 available hours.
+    return filtered[:24]
 
 
 # =========================================================
-# WEATHER DATA
+# MAIN WEATHER FUNCTION
 # =========================================================
 
 def weather():
@@ -862,9 +993,9 @@ def weather():
     errors = []
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # NWS
-    # -----------------------------------------------------
+    # =====================================================
 
     try:
 
@@ -887,13 +1018,15 @@ def weather():
         )
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # OPEN-METEO
-    # -----------------------------------------------------
+    # =====================================================
 
     try:
 
-        open_meteo = get_open_meteo()
+        open_meteo = (
+            get_open_meteo()
+        )
 
     except Exception as e:
 
@@ -904,13 +1037,15 @@ def weather():
         )
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # WEATHERAPI
-    # -----------------------------------------------------
+    # =====================================================
 
     try:
 
-        weatherapi = get_weatherapi()
+        weatherapi = (
+            get_weatherapi()
+        )
 
     except Exception as e:
 
@@ -921,12 +1056,14 @@ def weather():
         )
 
 
-    # -----------------------------------------------------
-    # CURRENT DATA
-    # -----------------------------------------------------
+    # =====================================================
+    # CURRENT
+    # =====================================================
 
-    nws_current = get_nws_current(
-        nws
+    nws_current = (
+        get_nws_current(
+            nws
+        )
     )
 
     open_meteo_current = (
@@ -951,9 +1088,9 @@ def weather():
     )
 
 
-    # -----------------------------------------------------
-    # RESPONSE
-    # -----------------------------------------------------
+    # =====================================================
+    # RETURN
+    # =====================================================
 
     return {
 
@@ -980,10 +1117,6 @@ def weather():
             time.time() * 1000,
 
 
-        # -------------------------------------------------
-        # CURRENT
-        # -------------------------------------------------
-
         "current": {
 
             "consensus":
@@ -1001,37 +1134,27 @@ def weather():
         },
 
 
-        # -------------------------------------------------
-        # SIX HOUR
-        # -------------------------------------------------
-
         "sixHour":
             six_hour_extremes(
                 nws
             ),
 
 
-        # -------------------------------------------------
-        # FORECAST
-        # -------------------------------------------------
-
         "forecast":
-            build_forecast_consensus(
+            build_forecast(
                 nws,
                 open_meteo,
                 weatherapi
             ),
 
 
-        # -------------------------------------------------
-        # PROVIDERS
-        # -------------------------------------------------
-
         "providers": {
 
             "NWS":
                 bool(
-                    nws.get("forecast")
+                    nws.get(
+                        "forecast"
+                    )
                 ),
 
             "Open-Meteo":
@@ -1055,6 +1178,7 @@ def weather():
 
 HTML = r'''
 <!DOCTYPE html>
+
 <html>
 
 <head>
@@ -1197,16 +1321,6 @@ h1 {
     letter-spacing: 1px;
 
     margin-top: 22px;
-
-}
-
-.consensus {
-
-    font-size: 34px;
-
-    font-weight: 700;
-
-    margin-top: 4px;
 
 }
 
@@ -1501,7 +1615,7 @@ KNYC • Central Park, New York
 
 
 <!-- =====================================================
-     CURRENT CONSENSUS
+     CURRENT
 ===================================================== -->
 
 <div class="card current">
@@ -1536,13 +1650,12 @@ Updating...
 
 
 <div class="consensus-label">
-SOURCE TEMPERATURES
+CURRENT SOURCE TEMPERATURES
 </div>
 
 
 <div id="currentSources"
      class="source-grid">
-
 </div>
 
 
@@ -1550,7 +1663,7 @@ SOURCE TEMPERATURES
 
 
 <!-- =====================================================
-     CURRENT CONDITIONS
+     CONDITIONS
 ===================================================== -->
 
 <div class="card">
@@ -1620,14 +1733,12 @@ Past 6 Hours
 PEAK TEMPERATURE
 </div>
 
-
 <div id="high"
      class="stat-value">
 
 --.-°F
 
 </div>
-
 
 <div id="highTime"
      class="stat-time">
@@ -1645,14 +1756,12 @@ PEAK TEMPERATURE
 LOWEST TEMPERATURE
 </div>
 
-
 <div id="low"
      class="stat-value">
 
 --.-°F
 
 </div>
-
 
 <div id="lowTime"
      class="stat-time">
@@ -1691,7 +1800,7 @@ Loading...
 
 
 <!-- =====================================================
-     FORECAST
+     NEXT 24 HOURS
 ===================================================== -->
 
 <div class="card">
@@ -1730,7 +1839,7 @@ Refresh Weather
 
 
 // =========================================================
-// LOAD WEATHER
+// LOAD
 // =========================================================
 
 async function loadWeather() {
@@ -1739,6 +1848,7 @@ async function loadWeather() {
         document.getElementById(
             "error"
         );
+
 
     error.style.display =
         "none";
@@ -1842,10 +1952,10 @@ function temp(value) {
 
 
 // =========================================================
-// CURRENT SOURCE CARD
+// SOURCE CARD
 // =========================================================
 
-function makeSourceCard(
+function sourceCard(
     name,
     source
 ) {
@@ -1877,7 +1987,8 @@ function makeSourceCard(
     }
 
 
-    let sourceTime = "--";
+    let sourceTime =
+        "--";
 
 
     if (
@@ -1916,7 +2027,7 @@ function makeSourceCard(
 
 
 // =========================================================
-// SHOW WEATHER
+// DISPLAY
 // =========================================================
 
 function showWeather(data) {
@@ -1983,46 +2094,48 @@ function showWeather(data) {
         "updated"
     ).textContent =
         "Updated " +
-        time(data.fetchedAt) +
+        time(
+            data.fetchedAt
+        ) +
         " • " +
         (
             consensus.sourceCount || 0
         ) +
-        " sources";
+        " current sources";
 
 
     // -----------------------------------------------------
     // CURRENT SOURCES
     // -----------------------------------------------------
 
-    const sourceBox =
+    const currentSources =
         document.getElementById(
             "currentSources"
         );
 
 
-    sourceBox.innerHTML =
+    currentSources.innerHTML =
         "";
 
 
-    sourceBox.appendChild(
-        makeSourceCard(
+    currentSources.appendChild(
+        sourceCard(
             "NWS",
             current.NWS
         )
     );
 
 
-    sourceBox.appendChild(
-        makeSourceCard(
+    currentSources.appendChild(
+        sourceCard(
             "Open-Meteo",
             current["Open-Meteo"]
         )
     );
 
 
-    sourceBox.appendChild(
-        makeSourceCard(
+    currentSources.appendChild(
+        sourceCard(
             "WeatherAPI",
             current.WeatherAPI
         )
@@ -2189,7 +2302,8 @@ function showWeather(data) {
         "";
 
 
-    let providerCount = 0;
+    let providerCount =
+        0;
 
 
     Object.entries(
@@ -2239,13 +2353,13 @@ function showWeather(data) {
     // FORECAST
     // -----------------------------------------------------
 
-    const forecastBox =
+    const forecast =
         document.getElementById(
             "forecast"
         );
 
 
-    forecastBox.innerHTML =
+    forecast.innerHTML =
         "";
 
 
@@ -2322,7 +2436,7 @@ function showWeather(data) {
             `;
 
 
-            forecastBox.appendChild(
+            forecast.appendChild(
                 row
             );
 
@@ -2340,7 +2454,7 @@ loadWeather();
 
 
 // =========================================================
-// AUTO REFRESH — EVERY 5 MINUTES
+// REFRESH EVERY 5 MINUTES
 // =========================================================
 
 setInterval(
@@ -2374,16 +2488,13 @@ class Handler(
                 "/api/weather"
             ):
 
-
                 data = json.dumps(
                     weather()
                 ).encode()
 
-
                 self.send_response(
                     200
                 )
-
 
                 self.send_header(
                     "Content-Type",
@@ -2393,16 +2504,13 @@ class Handler(
 
             else:
 
-
                 data = HTML.encode(
                     "utf-8"
                 )
 
-
                 self.send_response(
                     200
                 )
-
 
                 self.send_header(
                     "Content-Type",
@@ -2415,15 +2523,12 @@ class Handler(
                 "no-store, no-cache, must-revalidate"
             )
 
-
             self.send_header(
                 "Pragma",
                 "no-cache"
             )
 
-
             self.end_headers()
-
 
             self.wfile.write(
                 data
@@ -2431,7 +2536,6 @@ class Handler(
 
 
         except Exception as e:
-
 
             data = json.dumps({
 
@@ -2445,15 +2549,12 @@ class Handler(
                 500
             )
 
-
             self.send_header(
                 "Content-Type",
                 "application/json"
             )
 
-
             self.end_headers()
-
 
             self.wfile.write(
                 data
@@ -2470,7 +2571,7 @@ class Handler(
 
 
 # =========================================================
-# START SERVER
+# START
 # =========================================================
 
 port = int(
