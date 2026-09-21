@@ -1,708 +1,738 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.request import Request, urlopen
+from urllib.parse import urlencode
+from datetime import datetime, timezone, timedelta
+import json
+import os
+import statistics
+import time
 
-<title>Central Park Weather</title>
+LAT = 40.78
+LON = -73.97
 
-<style>
-* {
-    box-sizing: border-box;
-}
+UA = "CentralParkWeather/3.0"
 
-body {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-                 Roboto, Arial, sans-serif;
-    background: #f2f4f7;
-    color: #111;
-}
+# --------------------------------------------------
+# BASIC HTTP REQUEST
+# --------------------------------------------------
 
-.container {
-    max-width: 700px;
-    margin: auto;
-    padding: 16px;
-}
+def get_json(url):
+    request = Request(
+        url,
+        headers={
+            "User-Agent": UA,
+            "Accept": "application/geo+json, application/json"
+        }
+    )
 
-h1 {
-    margin: 5px 0 4px;
-    font-size: 28px;
-}
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read())
 
-.subtitle {
-    color: #666;
-    margin-bottom: 18px;
-}
 
-.card {
-    background: white;
-    border-radius: 18px;
-    padding: 18px;
-    margin-bottom: 15px;
-    box-shadow: 0 2px 10px rgba(0,0,0,.06);
-}
+# --------------------------------------------------
+# TEMPERATURE HELPERS
+# --------------------------------------------------
 
-.current {
-    text-align: center;
-}
+def c_to_f(c):
+    return (float(c) * 9 / 5) + 32
 
-.current-temp {
-    font-size: 58px;
-    font-weight: 700;
-    margin: 8px 0;
-}
 
-.description {
-    font-size: 18px;
-    color: #555;
-}
+def round_temp(value):
+    if value is None:
+        return None
 
-.updated {
-    font-size: 12px;
-    color: #888;
-    margin-top: 8px;
-}
+    return round(float(value), 1)
 
-h2 {
-    margin-top: 0;
-    font-size: 20px;
-}
 
-.stats {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-}
+# --------------------------------------------------
+# NWS / WEATHER.GOV
+# --------------------------------------------------
 
-.stat {
-    background: #f5f6f8;
-    border-radius: 14px;
-    padding: 14px;
-}
+def get_nws():
 
-.label {
-    color: #666;
-    font-size: 13px;
-    margin-bottom: 5px;
-}
+    point = get_json(
+        f"https://api.weather.gov/points/{LAT},{LON}"
+    )
 
-.value {
-    font-size: 25px;
-    font-weight: 700;
-}
+    properties = point["properties"]
 
-.small {
-    color: #777;
-    font-size: 13px;
-    margin-top: 4px;
-}
+    forecast_url = properties["forecastHourly"]
+    stations_url = properties["observationStations"]
 
-.hour {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 13px 4px;
-    border-bottom: 1px solid #eee;
-}
+    forecast = get_json(forecast_url)
 
-.hour:last-child {
-    border-bottom: none;
-}
+    stations = get_json(stations_url)
 
-.hour-time {
-    width: 25%;
-    font-weight: 600;
-}
+    station = None
 
-.hour-temp {
-    width: 25%;
-    font-size: 19px;
-    font-weight: 700;
-}
+    for feature in stations.get("features", []):
 
-.hour-weather {
-    width: 35%;
-    color: #555;
-    font-size: 14px;
-}
+        identifier = (
+            feature.get("properties", {})
+            .get("stationIdentifier")
+        )
 
-.hour-rain {
-    width: 15%;
-    text-align: right;
-    color: #2878c8;
-    font-size: 13px;
-}
+        if identifier == "KNYC":
+            station = feature
+            break
 
-.source-box {
-    font-size: 13px;
-    color: #666;
-    line-height: 1.6;
-}
+    if station is None:
+        raise Exception("KNYC station not found")
 
-.source {
-    display: inline-block;
-    background: #f0f1f3;
-    padding: 4px 8px;
-    border-radius: 8px;
-    margin: 3px;
-}
+    station_url = station["id"]
 
-.error {
-    background: #fff0f0;
-    color: #b00020;
-    padding: 12px;
-    border-radius: 12px;
-    display: none;
-    margin-bottom: 15px;
-}
+    # Latest observation
+    latest = get_json(
+        station_url + "/observations/latest"
+    )["properties"]
 
-.loading {
-    text-align: center;
-    padding: 20px;
-    color: #777;
-}
+    # Past six hours
+    now = datetime.now(timezone.utc)
 
-.refresh {
-    display: block;
-    width: 100%;
-    border: none;
-    border-radius: 12px;
-    padding: 13px;
-    background: #111;
-    color: white;
-    font-size: 15px;
-    cursor: pointer;
-    margin-top: 10px;
-}
+    start = now - timedelta(hours=6)
 
-.refresh:active {
-    opacity: .7;
-}
+    params = urlencode({
+        "start": start.isoformat(),
+        "end": now.isoformat()
+    })
 
-@media (max-width: 500px) {
+    history_url = (
+        station_url +
+        "/observations?" +
+        params
+    )
 
-    .container {
-        padding: 12px;
+    history = get_json(history_url)
+
+    return {
+        "forecast": forecast
+        .get("properties", {})
+        .get("periods", []),
+
+        "current": latest,
+
+        "history": history.get(
+            "features",
+            []
+        )
     }
 
-    h1 {
-        font-size: 25px;
+
+# --------------------------------------------------
+# OPEN-METEO
+# --------------------------------------------------
+
+def get_open_meteo():
+
+    params = urlencode({
+        "latitude": LAT,
+        "longitude": LON,
+        "hourly": "temperature_2m",
+        "temperature_unit": "fahrenheit",
+        "timezone": "America/New_York",
+        "forecast_days": 2
+    })
+
+    url = (
+        "https://api.open-meteo.com/v1/forecast?"
+        + params
+    )
+
+    return get_json(url)
+
+
+# --------------------------------------------------
+# OPTIONAL WEATHERAPI
+# --------------------------------------------------
+
+def get_weatherapi():
+
+    key = os.environ.get(
+        "WEATHERAPI_KEY"
+    )
+
+    if not key:
+        return None
+
+    params = urlencode({
+        "key": key,
+        "q": f"{LAT},{LON}",
+        "days": 2,
+        "aqi": "no",
+        "alerts": "no"
+    })
+
+    url = (
+        "https://api.weatherapi.com/v1/forecast.json?"
+        + params
+    )
+
+    return get_json(url)
+
+
+# --------------------------------------------------
+# NWS CURRENT CONDITIONS
+# --------------------------------------------------
+
+def current_conditions(nws):
+
+    obs = nws.get(
+        "current",
+        {}
+    )
+
+    temperature = (
+        obs.get("temperature", {})
+        .get("value")
+    )
+
+    wind = (
+        obs.get("windSpeed", {})
+        .get("value")
+    )
+
+    if temperature is not None:
+        temperature = c_to_f(
+            temperature
+        )
+
+    if wind is not None:
+        wind = float(wind) * 0.621371
+
+    humidity = (
+        obs.get("relativeHumidity", {})
+        .get("value")
+    )
+
+    return {
+        "temperatureF": round_temp(
+            temperature
+        ),
+
+        "humidity": humidity,
+
+        "windMph": round_temp(
+            wind
+        ),
+
+        "description": obs.get(
+            "textDescription"
+        ),
+
+        "textDescription": obs.get(
+            "textDescription"
+        )
     }
 
-    .current-temp {
-        font-size: 52px;
-    }
 
-    .hour-weather {
-        font-size: 12px;
-    }
-}
-</style>
-</head>
+# --------------------------------------------------
+# PAST SIX-HOUR HIGH / LOW
+# --------------------------------------------------
 
-<body>
+def get_six_hour_extremes(nws):
 
-<div class="container">
+    observations = []
 
-    <h1>Central Park Weather</h1>
+    for feature in nws.get(
+        "history",
+        []
+    ):
 
-    <div class="subtitle">
-        KNYC • New York City
-    </div>
+        properties = feature.get(
+            "properties",
+            {}
+        )
 
-    <div id="error" class="error"></div>
+        value = (
+            properties
+            .get("temperature", {})
+            .get("value")
+        )
 
-    <!-- CURRENT CONDITIONS -->
+        timestamp = properties.get(
+            "timestamp"
+        )
 
-    <div class="card current">
+        if value is None:
+            continue
 
-        <div class="label">
-            CURRENT TEMPERATURE
-        </div>
+        observations.append({
+            "temperature": c_to_f(
+                value
+            ),
+            "time": timestamp
+        })
 
-        <div id="currentTemp"
-             class="current-temp">
-            --.-°F
-        </div>
+    if not observations:
 
-        <div id="description"
-             class="description">
-            Loading...
-        </div>
-
-        <div id="updated"
-             class="updated">
-            Updating...
-        </div>
-
-    </div>
-
-
-    <!-- CURRENT DETAILS -->
-
-    <div class="card">
-
-        <h2>Current Conditions</h2>
-
-        <div class="stats">
-
-            <div class="stat">
-
-                <div class="label">
-                    Humidity
-                </div>
-
-                <div id="humidity"
-                     class="value">
-                    --%
-                </div>
-
-            </div>
-
-            <div class="stat">
-
-                <div class="label">
-                    Wind
-                </div>
-
-                <div id="wind"
-                     class="value">
-                    --.- mph
-                </div>
-
-            </div>
-
-        </div>
-
-    </div>
-
-
-    <!-- PAST 6 HOURS -->
-
-    <div class="card">
-
-        <h2>Past 6 Hours</h2>
-
-        <div class="stats">
-
-            <div class="stat">
-
-                <div class="label">
-                    PEAK TEMPERATURE
-                </div>
-
-                <div id="sixHourHigh"
-                     class="value">
-                    --.-°F
-                </div>
-
-                <div id="sixHourHighTime"
-                     class="small">
-                    --
-                </div>
-
-            </div>
-
-
-            <div class="stat">
-
-                <div class="label">
-                    LOWEST TEMPERATURE
-                </div>
-
-                <div id="sixHourLow"
-                     class="value">
-                    --.-°F
-                </div>
-
-                <div id="sixHourLowTime"
-                     class="small">
-                    --
-                </div>
-
-            </div>
-
-        </div>
-
-    </div>
-
-
-    <!-- FORECAST SOURCES -->
-
-    <div class="card">
-
-        <h2>Forecast Sources</h2>
-
-        <div id="sources"
-             class="source-box">
-            Loading...
-        </div>
-
-    </div>
-
-
-    <!-- HOURLY FORECAST -->
-
-    <div class="card">
-
-        <h2>Next 24 Hours</h2>
-
-        <div id="forecast">
-
-            <div class="loading">
-                Loading forecast...
-            </div>
-
-        </div>
-
-    </div>
-
-
-    <button class="refresh"
-            onclick="loadWeather()">
-
-        Refresh Weather
-
-    </button>
-
-</div>
-
-
-<script>
-
-async function loadWeather() {
-
-    const errorBox =
-        document.getElementById("error");
-
-    errorBox.style.display = "none";
-
-    try {
-
-        const response =
-            await fetch(
-                "/api/weather?time=" +
-                Date.now(),
-                {
-                    cache: "no-store"
-                }
-            );
-
-        if (!response.ok) {
-            throw new Error(
-                "Weather server returned " +
-                response.status
-            );
+        return {
+            "high": None,
+            "low": None
         }
 
-        const data =
-            await response.json();
+    high = max(
+        observations,
+        key=lambda x: x["temperature"]
+    )
 
-        displayWeather(data);
+    low = min(
+        observations,
+        key=lambda x: x["temperature"]
+    )
 
-    } catch (error) {
+    return {
+        "high": {
+            "temperature": round_temp(
+                high["temperature"]
+            ),
+            "time": high["time"]
+        },
 
-        console.error(error);
-
-        errorBox.textContent =
-            "Unable to load weather: " +
-            error.message;
-
-        errorBox.style.display =
-            "block";
-    }
-}
-
-
-function displayWeather(data) {
-
-    /*
-     * CURRENT CONDITIONS
-     */
-
-    const current =
-        data.current || {};
-
-    if (current.temperatureF != null) {
-
-        document.getElementById(
-            "currentTemp"
-        ).textContent =
-            Number(
-                current.temperatureF
-            ).toFixed(1) + "°F";
-    }
-
-    document.getElementById(
-        "description"
-    ).textContent =
-        current.description ||
-        "Conditions unavailable";
-
-
-    if (current.humidity != null) {
-
-        document.getElementById(
-            "humidity"
-        ).textContent =
-            Number(
-                current.humidity
-            ).toFixed(0) + "%";
-    }
-
-
-    if (current.windMph != null) {
-
-        document.getElementById(
-            "wind"
-        ).textContent =
-            Number(
-                current.windMph
-            ).toFixed(1) +
-            " mph";
-    }
-
-
-    /*
-     * UPDATED TIME
-     */
-
-    if (data.fetchedAt) {
-
-        document.getElementById(
-            "updated"
-        ).textContent =
-            "Updated " +
-            new Date(
-                data.fetchedAt
-            ).toLocaleTimeString(
-                [],
-                {
-                    hour: "numeric",
-                    minute: "2-digit"
-                }
-            );
-    }
-
-
-    /*
-     * PAST 6-HOUR HIGH / LOW
-     */
-
-    const sixHour =
-        data.sixHour || {};
-
-
-    if (sixHour.high) {
-
-        document.getElementById(
-            "sixHourHigh"
-        ).textContent =
-            Number(
-                sixHour.high.temperature
-            ).toFixed(1) + "°F";
-
-
-        document.getElementById(
-            "sixHourHighTime"
-        ).textContent =
-            formatTime(
-                sixHour.high.time
-            );
-    }
-
-
-    if (sixHour.low) {
-
-        document.getElementById(
-            "sixHourLow"
-        ).textContent =
-            Number(
-                sixHour.low.temperature
-            ).toFixed(1) + "°F";
-
-
-        document.getElementById(
-            "sixHourLowTime"
-        ).textContent =
-            formatTime(
-                sixHour.low.time
-            );
-    }
-
-
-    /*
-     * FORECAST SOURCES
-     */
-
-    const providers =
-        data.providers || {};
-
-    const sourceBox =
-        document.getElementById(
-            "sources"
-        );
-
-    sourceBox.innerHTML = "";
-
-
-    Object.entries(
-        providers
-    ).forEach(
-        ([name, available]) => {
-
-            if (available) {
-
-                const span =
-                    document.createElement(
-                        "span"
-                    );
-
-                span.className =
-                    "source";
-
-                span.textContent =
-                    "✓ " + name;
-
-                sourceBox.appendChild(
-                    span
-                );
-            }
-
+        "low": {
+            "temperature": round_temp(
+                low["temperature"]
+            ),
+            "time": low["time"]
         }
-    );
-
-
-    /*
-     * HOURLY FORECAST
-     */
-
-    const forecast =
-        data.forecast || [];
-
-    const forecastBox =
-        document.getElementById(
-            "forecast"
-        );
-
-    forecastBox.innerHTML = "";
-
-
-    forecast.slice(
-        0,
-        24
-    ).forEach(
-        period => {
-
-            const row =
-                document.createElement(
-                    "div"
-                );
-
-            row.className =
-                "hour";
-
-
-            const time =
-                formatTime(
-                    period.time
-                );
-
-
-            const temp =
-                period.temperature != null
-                ? Number(
-                    period.temperature
-                  ).toFixed(1) + "°F"
-                : "--.-°F";
-
-
-            const weather =
-                period.shortForecast ||
-                "—";
-
-
-            const rain =
-                period.pop != null
-                ? Number(
-                    period.pop
-                  ).toFixed(0) + "%"
-                : "—";
-
-
-            row.innerHTML = `
-
-                <div class="hour-time">
-                    ${time}
-                </div>
-
-                <div class="hour-temp">
-                    ${temp}
-                </div>
-
-                <div class="hour-weather">
-                    ${weather}
-                </div>
-
-                <div class="hour-rain">
-                    ${rain}
-                </div>
-
-            `;
-
-
-            forecastBox.appendChild(
-                row
-            );
-
-        }
-    );
-
-}
-
-
-function formatTime(timestamp) {
-
-    if (!timestamp) {
-        return "--";
     }
 
-    const date =
-        new Date(timestamp);
 
-    if (isNaN(date.getTime())) {
-        return "--";
+# --------------------------------------------------
+# BUILD CONSENSUS FORECAST
+# --------------------------------------------------
+
+def build_forecast(
+    nws,
+    open_meteo,
+    weatherapi
+):
+
+    # Each hour gets a list of provider values.
+    hourly = {}
+
+    # ----------------------------------------------
+    # NWS
+    # ----------------------------------------------
+
+    for period in nws.get(
+        "forecast",
+        []
+    ):
+
+        timestamp = period.get(
+            "startTime"
+        )
+
+        temperature = period.get(
+            "temperature"
+        )
+
+        if timestamp is None:
+            continue
+
+        if temperature is None:
+            continue
+
+        hourly.setdefault(
+            timestamp,
+            {}
+        )["NWS"] = float(
+            temperature
+        )
+
+    # ----------------------------------------------
+    # OPEN-METEO
+    # ----------------------------------------------
+
+    if open_meteo:
+
+        times = (
+            open_meteo
+            .get("hourly", {})
+            .get("time", [])
+        )
+
+        temperatures = (
+            open_meteo
+            .get("hourly", {})
+            .get("temperature_2m", [])
+        )
+
+        for local_time, temperature in zip(
+            times,
+            temperatures
+        ):
+
+            if temperature is None:
+                continue
+
+            try:
+
+                dt = datetime.fromisoformat(
+                    local_time
+                )
+
+                # Open-Meteo gives local New York
+                # time because timezone was requested.
+                #
+                # Convert it to UTC so it lines
+                # up with NWS timestamps.
+
+                eastern = timezone(
+                    timedelta(hours=-4)
+                )
+
+                utc_time = dt.replace(
+                    tzinfo=eastern
+                ).astimezone(
+                    timezone.utc
+                )
+
+                timestamp = (
+                    utc_time
+                    .isoformat()
+                    .replace(
+                        "+00:00",
+                        "Z"
+                    )
+                )
+
+                hourly.setdefault(
+                    timestamp,
+                    {}
+                )["Open-Meteo"] = float(
+                    temperature
+                )
+
+            except Exception:
+                pass
+
+    # ----------------------------------------------
+    # WEATHERAPI
+    # ----------------------------------------------
+
+    if weatherapi:
+
+        for day in (
+            weatherapi
+            .get("forecast", {})
+            .get("forecastday", [])
+        ):
+
+            for hour in day.get(
+                "hour",
+                []
+            ):
+
+                local_time = hour.get(
+                    "time"
+                )
+
+                temperature = hour.get(
+                    "temp_f"
+                )
+
+                if (
+                    local_time is None
+                    or temperature is None
+                ):
+                    continue
+
+                # WeatherAPI local time
+                # is converted to UTC.
+                try:
+
+                    dt = datetime.fromisoformat(
+                        local_time
+                    )
+
+                    eastern = timezone(
+                        timedelta(hours=-4)
+                    )
+
+                    utc_time = dt.replace(
+                        tzinfo=eastern
+                    ).astimezone(
+                        timezone.utc
+                    )
+
+                    timestamp = (
+                        utc_time
+                        .isoformat()
+                        .replace(
+                            "+00:00",
+                            "Z"
+                        )
+                    )
+
+                    hourly.setdefault(
+                        timestamp,
+                        {}
+                    )["WeatherAPI"] = float(
+                        temperature
+                    )
+
+                except Exception:
+                    pass
+
+    # ----------------------------------------------
+    # CONSENSUS
+    # ----------------------------------------------
+
+    result = []
+
+    for timestamp, sources in hourly.items():
+
+        values = list(
+            sources.values()
+        )
+
+        if not values:
+            continue
+
+        # Median is used instead of "most common"
+        # because weather temperatures are continuous
+        # values and usually won't be identical.
+
+        consensus = statistics.median(
+            values
+        )
+
+        result.append({
+            "time": timestamp,
+            "startTime": timestamp,
+
+            "temperature": round_temp(
+                consensus
+            ),
+
+            "temperatureUnit": "F",
+            "unit": "F",
+
+            "shortForecast": "Consensus forecast",
+            "forecast": "Consensus forecast",
+
+            "sources": {
+                name: round_temp(value)
+                for name, value in sources.items()
+            },
+
+            "sourceCount": len(
+                sources
+            )
+        })
+
+    result.sort(
+        key=lambda x: x["time"]
+    )
+
+    return result[:24]
+
+
+# --------------------------------------------------
+# MAIN WEATHER FUNCTION
+# --------------------------------------------------
+
+def weather():
+
+    errors = []
+
+    # NWS
+    try:
+
+        nws = get_nws()
+
+    except Exception as error:
+
+        nws = {
+            "forecast": [],
+            "current": {},
+            "history": []
+        }
+
+        errors.append(
+            "NWS: " + str(error)
+        )
+
+    # Open-Meteo
+    try:
+
+        open_meteo = get_open_meteo()
+
+    except Exception as error:
+
+        open_meteo = None
+
+        errors.append(
+            "Open-Meteo: " + str(error)
+        )
+
+    # WeatherAPI
+    try:
+
+        weatherapi = get_weatherapi()
+
+    except Exception as error:
+
+        weatherapi = None
+
+        errors.append(
+            "WeatherAPI: " + str(error)
+        )
+
+    forecast = build_forecast(
+        nws,
+        open_meteo,
+        weatherapi
+    )
+
+    return {
+
+        "station": "KNYC",
+
+        "location": {
+            "name": "Central Park",
+            "latitude": LAT,
+            "longitude": LON
+        },
+
+        "fetchedAt":
+            time.time() * 1000,
+
+        "current":
+            current_conditions(nws),
+
+        "sixHour":
+            get_six_hour_extremes(nws),
+
+        "forecast":
+            forecast,
+
+        "providers": {
+            "NWS":
+                len(
+                    nws.get(
+                        "forecast",
+                        []
+                    )
+                ) > 0,
+
+            "Open-Meteo":
+                open_meteo is not None,
+
+            "WeatherAPI":
+                weatherapi is not None
+        },
+
+        "errors":
+            errors
     }
 
-    return date.toLocaleTimeString(
-        [],
-        {
-            hour: "numeric",
-            minute: "2-digit"
-        }
-    );
-}
+
+# --------------------------------------------------
+# WEB SERVER
+# --------------------------------------------------
+
+class Handler(
+    BaseHTTPRequestHandler
+):
+
+    def do_GET(self):
+
+        try:
+
+            if self.path.startswith(
+                "/api/weather"
+            ):
+
+                data = json.dumps(
+                    weather()
+                ).encode()
+
+                self.send_response(200)
+
+                self.send_header(
+                    "Content-Type",
+                    "application/json"
+                )
+
+            else:
+
+                with open(
+                    "index.html",
+                    "rb"
+                ) as file:
+
+                    data = file.read()
+
+                self.send_response(200)
+
+                self.send_header(
+                    "Content-Type",
+                    "text/html; charset=utf-8"
+                )
+
+            self.send_header(
+                "Cache-Control",
+                "no-store"
+            )
+
+            self.end_headers()
+
+            self.wfile.write(
+                data
+            )
+
+        except Exception as error:
+
+            data = json.dumps({
+                "error": str(error)
+            }).encode()
+
+            self.send_response(500)
+
+            self.send_header(
+                "Content-Type",
+                "application/json"
+            )
+
+            self.send_header(
+                "Cache-Control",
+                "no-store"
+            )
+
+            self.end_headers()
+
+            self.wfile.write(
+                data
+            )
+
+    def log_message(
+        self,
+        format,
+        *args
+    ):
+        pass
 
 
-/*
- * LOAD IMMEDIATELY
- */
+# --------------------------------------------------
+# START SERVER
+# --------------------------------------------------
 
-loadWeather();
+port = int(
+    os.environ.get(
+        "PORT",
+        "10000"
+    )
+)
 
+print(
+    f"Central Park Weather running on port {port}"
+)
 
-/*
- * AUTO REFRESH EVERY 5 MINUTES
- */
+server = ThreadingHTTPServer(
+    ("0.0.0.0", port),
+    Handler
+)
 
-setInterval(
-    loadWeather,
-    5 * 60 * 1000
-);
-
-</script>
-
-</body>
-</html>
+server.serve_forever()
