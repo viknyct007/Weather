@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
 import json
 import os
+import time
 
 LAT, LON = 40.78, -73.97
 UA = "CentralParkWeather/1.0"
@@ -28,21 +29,32 @@ def weather():
 
     temp = obs.get("temperature", {}).get("value")
     wind = obs.get("windSpeed", {}).get("value")
+    description = obs.get("textDescription")
 
     return {
         "station": "KNYC",
+        "fetchedAt": time.time() * 1000,
+
         "current": {
             "temperatureF": None if temp is None else temp * 9 / 5 + 32,
             "humidity": obs.get("relativeHumidity", {}).get("value"),
             "windMph": None if wind is None else wind * 0.621371,
-            "textdescription": obs.get("textDescription")
+            "description": description,
+            "textDescription": description
         },
+
         "forecast": [
             {
-                "starttime": p["startTime"],
+                "time": p["startTime"],
+                "startTime": p["startTime"],
                 "temperature": p["temperature"],
+                "temperatureUnit": p["temperatureUnit"],
                 "unit": p["temperatureUnit"],
+                "shortForecast": p["shortForecast"],
                 "forecast": p["shortForecast"],
+                "pop": (
+                    p.get("probabilityOfPrecipitation") or {}
+                ).get("value"),
                 "precipitation": (
                     p.get("probabilityOfPrecipitation") or {}
                 ).get("value")
@@ -59,9 +71,11 @@ class Handler(BaseHTTPRequestHandler):
                 data = json.dumps(weather()).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+
             else:
                 with open("index.html", "rb") as f:
                     data = f.read()
+
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
 
