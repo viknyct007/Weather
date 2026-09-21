@@ -77,5 +77,5 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers(); self.wfile.write(body)
     def log_message(self,*args): pass
 
-print("Central Park Weather Predictor running at http://127.0.0.1:8000")
+print("Central Park Weather Predictor running at http://")
 ThreadingHTTPServer(("127.0.0.1",8000),Handler).serve_forever()
