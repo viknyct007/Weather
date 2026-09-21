@@ -35,11 +35,11 @@ def weather():
             "temperatureF": None if temp is None else temp * 9 / 5 + 32,
             "humidity": obs.get("relativeHumidity", {}).get("value"),
             "windMph": None if wind is None else wind * 0.621371,
-            "description": obs.get("textDescription")
+            "textdescription": obs.get("textDescription")
         },
         "forecast": [
             {
-                "time": p["startTime"],
+                "starttime": p["startTime"],
                 "temperature": p["temperature"],
                 "unit": p["temperatureUnit"],
                 "forecast": p["shortForecast"],
