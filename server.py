@@ -1,6 +1,6 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import json
@@ -10,21 +10,28 @@ import time
 
 
 # =========================================================
-# CENTRAL PARK
+# CONFIGURATION
 # =========================================================
 
-LAT = 40.77898
-LON = -73.96925
+LAT = 40.78
+LON = -73.97
 
-TIMEZONE = "America/New_York"
+STATION = "KNYC"
+LOCATION_NAME = "Central Park, New York"
 
-UA = "CentralParkWeather/6.0"
+TZ = ZoneInfo("America/New_York")
 
-EASTERN = ZoneInfo(TIMEZONE)
+UA = "CentralParkWeather/5.0"
+
+OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+
+NWS_POINT_URL = (
+    f"https://api.weather.gov/points/{LAT},{LON}"
+)
 
 
 # =========================================================
-# HTTP / JSON
+# HTTP
 # =========================================================
 
 def get_json(url):
@@ -37,150 +44,155 @@ def get_json(url):
         }
     )
 
-    with urlopen(req, timeout=20) as r:
-        return json.loads(r.read())
+    with urlopen(req, timeout=25) as response:
+
+        return json.loads(
+            response.read()
+        )
 
 
-def c_to_f(c):
-
-    if c is None:
-        return None
-
-    return float(c) * 9 / 5 + 32
-
+# =========================================================
+# TEMPERATURE HELPERS
+# =========================================================
 
 def round_temp(value):
 
     if value is None:
         return None
 
-    return round(float(value), 1)
+    return round(
+        float(value),
+        1
+    )
+
+
+def c_to_f(value):
+
+    if value is None:
+        return None
+
+    return float(value) * 9 / 5 + 32
 
 
 # =========================================================
 # TIME HELPERS
 # =========================================================
 
-def parse_datetime(value):
+def parse_iso(value):
 
     if not value:
         return None
 
     try:
 
-        value = value.replace(
-            "Z",
-            "+00:00"
-        )
-
-        dt = datetime.fromisoformat(
-            value
-        )
-
-        if dt.tzinfo is None:
-
-            dt = dt.replace(
-                tzinfo=EASTERN
+        return datetime.fromisoformat(
+            value.replace(
+                "Z",
+                "+00:00"
             )
-
-        return dt
+        )
 
     except Exception:
 
         return None
 
 
-def local_hour_key(value):
+def hour_key(dt):
 
-    """
-    Converts any provider timestamp into
-    the same New York local hourly key.
-
-    Example:
-
-    2026-09-21 18:00
-
-    All providers will use the same key.
-    """
-
-    dt = parse_datetime(value)
-
-    if dt is None:
-        return None
-
-    dt = dt.astimezone(
-        EASTERN
+    return dt.astimezone(
+        timezone.utc
+    ).strftime(
+        "%Y-%m-%dT%H:00:00Z"
     )
 
-    return dt.strftime(
+
+def local_hour_key(dt):
+
+    return dt.astimezone(
+        TZ
+    ).strftime(
         "%Y-%m-%d %H:00"
     )
 
 
-def display_time(value):
-
-    dt = parse_datetime(value)
-
-    if dt is None:
-        return "--"
-
-    return dt.astimezone(
-        EASTERN
-    ).strftime(
-        "%-I:%M %p"
-    )
-
-
 # =========================================================
-# NWS
+# NWS / KNYC ACTUAL OBSERVATION
 # =========================================================
 
 def get_nws():
 
     point = get_json(
-        f"https://api.weather.gov/points/{LAT},{LON}"
+        NWS_POINT_URL
     )
 
     properties = point["properties"]
 
-    forecast = get_json(
-        properties["forecastHourly"]
-    )
+    forecast_url = properties[
+        "forecastHourly"
+    ]
+
+    observation_stations_url = properties[
+        "observationStations"
+    ]
+
+    # -----------------------------------------
+    # Find KNYC
+    # -----------------------------------------
 
     stations = get_json(
-        properties["observationStations"]
+        observation_stations_url
     )
 
-    station = None
+    station_url = None
 
     for feature in stations.get(
         "features",
         []
     ):
 
-        station_id = (
-            feature
-            .get("properties", {})
-            .get("stationIdentifier")
+        station_properties = (
+            feature.get(
+                "properties",
+                {}
+            )
         )
 
-        if station_id == "KNYC":
+        if (
+            station_properties.get(
+                "stationIdentifier"
+            )
+            == STATION
+        ):
 
-            station = feature
+            station_url = feature.get(
+                "id"
+            )
+
             break
 
-    if not station:
+    if not station_url:
 
         raise Exception(
             "KNYC station not found"
         )
 
-    station_url = station["id"]
+    # -----------------------------------------
+    # Latest actual observation
+    # -----------------------------------------
 
-    current = get_json(
+    latest = get_json(
         station_url +
         "/observations/latest"
-    )["properties"]
+    )
+
+    actual = latest.get(
+        "properties",
+        {}
+    )
+
+    # -----------------------------------------
+    # Previous 6 hours
+    # -----------------------------------------
 
     now = datetime.now(
         timezone.utc
@@ -206,17 +218,33 @@ def get_nws():
         params
     )
 
+    # -----------------------------------------
+    # Hourly NWS forecast
+    # -----------------------------------------
+
+    forecast = get_json(
+        forecast_url
+    )
+
     return {
 
-        "forecast":
-            forecast["properties"]["periods"],
-
-        "current":
-            current,
+        "actual":
+            actual,
 
         "history":
             history.get(
                 "features",
+                []
+            ),
+
+        "forecast":
+            forecast
+            .get(
+                "properties",
+                {}
+            )
+            .get(
+                "periods",
                 []
             )
 
@@ -224,342 +252,93 @@ def get_nws():
 
 
 # =========================================================
-# OPEN-METEO
+# ACTUAL KNYC CONDITIONS
 # =========================================================
 
-def get_open_meteo():
-
-    params = urlencode({
-
-        "latitude":
-            LAT,
-
-        "longitude":
-            LON,
-
-        "current":
-            ",".join([
-                "temperature_2m",
-                "relative_humidity_2m",
-                "wind_speed_10m",
-                "weather_code"
-            ]),
-
-        "hourly":
-            "temperature_2m",
-
-        "temperature_unit":
-            "fahrenheit",
-
-        "wind_speed_unit":
-            "mph",
-
-        "timezone":
-            TIMEZONE,
-
-        "forecast_days":
-            2
-
-    })
-
-    return get_json(
-        "https://api.open-meteo.com/v1/forecast?"
-        + params
-    )
-
-
-# =========================================================
-# WEATHERAPI
-# =========================================================
-
-def get_weatherapi():
-
-    key = os.environ.get(
-        "WEATHERAPI_KEY"
-    )
-
-    if not key:
-
-        return None
-
-    params = urlencode({
-
-        "key":
-            key,
-
-        "q":
-            f"{LAT},{LON}",
-
-        "days":
-            2,
-
-        "aqi":
-            "no",
-
-        "alerts":
-            "no"
-
-    })
-
-    return get_json(
-        "https://api.weatherapi.com/v1/forecast.json?"
-        + params
-    )
-
-
-# =========================================================
-# NWS CURRENT
-# =========================================================
-
-def get_nws_current(nws):
+def get_actual_conditions(nws):
 
     obs = nws.get(
-        "current",
+        "actual",
         {}
     )
 
-    temp_c = (
+    temperature = (
         obs
-        .get("temperature", {})
-        .get("value")
-    )
-
-    wind_ms = (
-        obs
-        .get("windSpeed", {})
-        .get("value")
+        .get(
+            "temperature",
+            {}
+        )
+        .get(
+            "value"
+        )
     )
 
     humidity = (
         obs
-        .get("relativeHumidity", {})
-        .get("value")
+        .get(
+            "relativeHumidity",
+            {}
+        )
+        .get(
+            "value"
+        )
     )
 
-    temp_f = None
-
-    if temp_c is not None:
-
-        temp_f = c_to_f(
-            temp_c
+    wind = (
+        obs
+        .get(
+            "windSpeed",
+            {}
         )
+        .get(
+            "value"
+        )
+    )
 
-    wind_mph = None
+    # NWS temperature is Celsius
 
-    if wind_ms is not None:
+    temperature = c_to_f(
+        temperature
+    )
 
-        wind_mph = (
-            float(wind_ms)
-            * 2.236936
+    # NWS wind is km/h
+
+    if wind is not None:
+
+        wind = (
+            float(wind)
+            * 0.621371
         )
 
     return {
 
         "temperatureF":
-            round_temp(temp_f),
+            round_temp(
+                temperature
+            ),
 
         "humidity":
-            round_temp(humidity),
+            round_temp(
+                humidity
+            ),
 
         "windMph":
-            round_temp(wind_mph),
+            round_temp(
+                wind
+            ),
 
         "description":
             obs.get(
                 "textDescription"
             ),
 
-        "time":
+        "timestamp":
             obs.get(
                 "timestamp"
             ),
 
         "station":
-            "KNYC"
-
-    }
-
-
-# =========================================================
-# OPEN-METEO CURRENT
-# =========================================================
-
-def get_open_meteo_current(
-    open_meteo
-):
-
-    if not open_meteo:
-
-        return None
-
-    current = open_meteo.get(
-        "current",
-        {}
-    )
-
-    return {
-
-        "temperatureF":
-            round_temp(
-                current.get(
-                    "temperature_2m"
-                )
-            ),
-
-        "humidity":
-            round_temp(
-                current.get(
-                    "relative_humidity_2m"
-                )
-            ),
-
-        "windMph":
-            round_temp(
-                current.get(
-                    "wind_speed_10m"
-                )
-            ),
-
-        "time":
-            current.get(
-                "time"
-            )
-
-    }
-
-
-# =========================================================
-# WEATHERAPI CURRENT
-# =========================================================
-
-def get_weatherapi_current(
-    weatherapi
-):
-
-    if not weatherapi:
-
-        return None
-
-    current = weatherapi.get(
-        "current",
-        {}
-    )
-
-    condition = (
-        current
-        .get("condition", {})
-        .get("text")
-    )
-
-    return {
-
-        "temperatureF":
-            round_temp(
-                current.get(
-                    "temp_f"
-                )
-            ),
-
-        "humidity":
-            round_temp(
-                current.get(
-                    "humidity"
-                )
-            ),
-
-        "windMph":
-            round_temp(
-                current.get(
-                    "wind_mph"
-                )
-            ),
-
-        "description":
-            condition,
-
-        "time":
-            current.get(
-                "last_updated"
-            )
-
-    }
-
-
-# =========================================================
-# CURRENT CONSENSUS
-# =========================================================
-
-def build_current_consensus(
-    nws,
-    open_meteo,
-    weatherapi
-):
-
-    sources = {}
-
-    if (
-        nws
-        and nws.get(
-            "temperatureF"
-        ) is not None
-    ):
-
-        sources["NWS"] = (
-            nws["temperatureF"]
-        )
-
-    if (
-        open_meteo
-        and open_meteo.get(
-            "temperatureF"
-        ) is not None
-    ):
-
-        sources["Open-Meteo"] = (
-            open_meteo[
-                "temperatureF"
-            ]
-        )
-
-    if (
-        weatherapi
-        and weatherapi.get(
-            "temperatureF"
-        ) is not None
-    ):
-
-        sources["WeatherAPI"] = (
-            weatherapi[
-                "temperatureF"
-            ]
-        )
-
-    values = list(
-        sources.values()
-    )
-
-    if values:
-
-        consensus = statistics.median(
-            values
-        )
-
-    else:
-
-        consensus = None
-
-    return {
-
-        "temperatureF":
-            round_temp(
-                consensus
-            ),
-
-        "sources":
-            sources,
-
-        "sourceCount":
-            len(sources)
+            STATION
 
     }
 
@@ -568,7 +347,7 @@ def build_current_consensus(
 # PAST 6 HOURS
 # =========================================================
 
-def six_hour_extremes(nws):
+def get_six_hour_extremes(nws):
 
     observations = []
 
@@ -584,15 +363,23 @@ def six_hour_extremes(nws):
 
         value = (
             props
-            .get("temperature", {})
-            .get("value")
+            .get(
+                "temperature",
+                {}
+            )
+            .get(
+                "value"
+            )
         )
 
         timestamp = props.get(
             "timestamp"
         )
 
-        if value is None:
+        if (
+            value is None
+            or timestamp is None
+        ):
 
             continue
 
@@ -601,7 +388,7 @@ def six_hour_extremes(nws):
             "temperature":
                 c_to_f(value),
 
-            "time":
+            "timestamp":
                 timestamp
 
         })
@@ -610,11 +397,8 @@ def six_hour_extremes(nws):
 
         return {
 
-            "high":
-                None,
-
-            "low":
-                None
+            "high": None,
+            "low": None
 
         }
 
@@ -639,8 +423,8 @@ def six_hour_extremes(nws):
                     high["temperature"]
                 ),
 
-            "time":
-                high["time"]
+            "timestamp":
+                high["timestamp"]
 
         },
 
@@ -651,8 +435,8 @@ def six_hour_extremes(nws):
                     low["temperature"]
                 ),
 
-            "time":
-                low["time"]
+            "timestamp":
+                low["timestamp"]
 
         }
 
@@ -660,261 +444,257 @@ def six_hour_extremes(nws):
 
 
 # =========================================================
-# FORECAST
+# OPEN-METEO MODEL REQUEST
 # =========================================================
 
-def build_forecast(
-    nws,
-    open_meteo,
-    weatherapi
+def get_model(
+    model_name,
+    display_name,
+    forecast_days=2
 ):
 
-    hourly = {}
+    params = urlencode({
 
+        "latitude":
+            LAT,
 
-    # =====================================================
-    # NWS
-    # =====================================================
+        "longitude":
+            LON,
 
-    for period in nws.get(
-        "forecast",
+        "hourly":
+            "temperature_2m",
+
+        "temperature_unit":
+            "fahrenheit",
+
+        "timezone":
+            "UTC",
+
+        "forecast_days":
+            forecast_days,
+
+        "models":
+            model_name
+
+    })
+
+    url = (
+        OPEN_METEO_URL +
+        "?" +
+        params
+    )
+
+    data = get_json(
+        url
+    )
+
+    hourly = data.get(
+        "hourly",
+        {}
+    )
+
+    times = hourly.get(
+        "time",
         []
-    ):
+    )
 
-        timestamp = period.get(
-            "startTime"
-        )
-
-        temperature = period.get(
-            "temperature"
-        )
-
-        if (
-            timestamp is None
-            or temperature is None
-        ):
-
-            continue
-
-        key = local_hour_key(
-            timestamp
-        )
-
-        if key is None:
-
-            continue
-
-        hourly.setdefault(
-            key,
-            {}
-        )["NWS"] = float(
-            temperature
-        )
-
-
-    # =====================================================
-    # OPEN-METEO
-    # =====================================================
-
-    if open_meteo:
-
-        times = (
-            open_meteo
-            .get("hourly", {})
-            .get("time", [])
-        )
-
-        temperatures = (
-            open_meteo
-            .get("hourly", {})
-            .get(
-                "temperature_2m",
-                []
-            )
-        )
-
-        for local_time, temperature in zip(
-            times,
-            temperatures
-        ):
-
-            if temperature is None:
-
-                continue
-
-            key = local_hour_key(
-                local_time
-            )
-
-            if key is None:
-
-                continue
-
-            hourly.setdefault(
-                key,
-                {}
-            )["Open-Meteo"] = float(
-                temperature
-            )
-
-
-    # =====================================================
-    # WEATHERAPI
-    # =====================================================
-
-    if weatherapi:
-
-        forecast_days = (
-            weatherapi
-            .get("forecast", {})
-            .get(
-                "forecastday",
-                []
-            )
-        )
-
-        for day in forecast_days:
-
-            for hour in day.get(
-                "hour",
-                []
-            ):
-
-                local_time = hour.get(
-                    "time"
-                )
-
-                temperature = hour.get(
-                    "temp_f"
-                )
-
-                if (
-                    local_time is None
-                    or temperature is None
-                ):
-
-                    continue
-
-                key = local_hour_key(
-                    local_time
-                )
-
-                if key is None:
-
-                    continue
-
-                hourly.setdefault(
-                    key,
-                    {}
-                )["WeatherAPI"] = float(
-                    temperature
-                )
-
-
-    # =====================================================
-    # BUILD CONSENSUS
-    # =====================================================
+    temperatures = hourly.get(
+        "temperature_2m",
+        []
+    )
 
     result = []
 
+    for timestamp, temperature in zip(
+        times,
+        temperatures
+    ):
 
-    for key, sources in hourly.items():
-
-        if not sources:
-
+        if temperature is None:
             continue
+
+        try:
+
+            dt = datetime.fromisoformat(
+                timestamp
+            )
+
+            # Open-Meteo is requested in UTC
+            # so this is already an absolute time.
+
+            if dt.tzinfo is None:
+
+                dt = dt.replace(
+                    tzinfo=timezone.utc
+                )
+
+            result.append({
+
+                "time":
+                    hour_key(dt),
+
+                "temperature":
+                    round_temp(
+                        temperature
+                    )
+
+            })
+
+        except Exception:
+            continue
+
+    return {
+
+        "name":
+            display_name,
+
+        "model":
+            model_name,
+
+        "data":
+            result
+
+    }
+
+
+# =========================================================
+# ALL MODELS
+# =========================================================
+
+def get_all_models():
+
+    models = {
+
+        # ECMWF
+        "ECMWF IFS":
+            "ecmwf_ifs025",
+
+        "ECMWF AIFS":
+            "ecmwf_aifs025",
+
+        # NOAA
+        "GFS":
+            "gfs_seamless",
+
+        "HRRR":
+            "hrrr",
+
+        "NBM":
+            "nbm_conus",
+
+        "NAM":
+            "nam_conus"
+
+    }
+
+    results = {}
+
+    errors = []
+
+    for display_name, model_name in models.items():
+
+        try:
+
+            results[display_name] = get_model(
+                model_name,
+                display_name
+            )
+
+        except Exception as e:
+
+            errors.append(
+                display_name +
+                ": " +
+                str(e)
+            )
+
+    return results, errors
+
+
+# =========================================================
+# MODEL ALIGNMENT
+# =========================================================
+
+def align_models(
+    model_results
+):
+
+    aligned = {}
+
+    for model_name, model in (
+        model_results.items()
+    ):
+
+        for point in model.get(
+            "data",
+            []
+        ):
+
+            timestamp = point.get(
+                "time"
+            )
+
+            temperature = point.get(
+                "temperature"
+            )
+
+            if (
+                timestamp is None
+                or temperature is None
+            ):
+
+                continue
+
+            aligned.setdefault(
+                timestamp,
+                {}
+            )[model_name] = (
+                temperature
+            )
+
+    return aligned
+
+
+# =========================================================
+# CONSENSUS
+# =========================================================
+
+def calculate_consensus(
+    aligned
+):
+
+    forecast = []
+
+    for timestamp, sources in aligned.items():
 
         values = list(
             sources.values()
         )
 
+        if not values:
+            continue
+
+        # Median of the six models.
+        # Actual KNYC observation is NOT included.
+
         consensus = statistics.median(
             values
         )
 
-
-        # -------------------------------------------------
-        # Description
-        # -------------------------------------------------
-
-        description = "Consensus"
-
-
-        for period in nws.get(
-            "forecast",
-            []
-        ):
-
-            if (
-                local_hour_key(
-                    period.get(
-                        "startTime"
-                    )
-                )
-                == key
-            ):
-
-                description = period.get(
-                    "shortForecast",
-                    "Consensus"
-                )
-
-                break
-
-
-        # -------------------------------------------------
-        # Convert local key to ISO time
-        # -------------------------------------------------
-
-        try:
-
-            local_dt = datetime.strptime(
-                key,
-                "%Y-%m-%d %H:00"
-            )
-
-            local_dt = local_dt.replace(
-                tzinfo=EASTERN
-            )
-
-            iso_time = local_dt.isoformat()
-
-        except Exception:
-
-            continue
-
-
-        result.append({
+        forecast.append({
 
             "time":
-                iso_time,
+                timestamp,
 
-            "startTime":
-                iso_time,
-
-            "temperature":
+            "consensus":
                 round_temp(
                     consensus
                 ),
 
-            "temperatureUnit":
-                "F",
-
-            "unit":
-                "F",
-
-            "shortForecast":
-                description,
-
-            "forecast":
-                description,
-
             "sources": {
 
                 name:
-                    round_temp(
-                        value
-                    )
+                    round_temp(value)
 
                 for name, value
                 in sources.items()
@@ -926,76 +706,202 @@ def build_forecast(
 
         })
 
-
-    # =====================================================
-    # SORT BY TIME
-    # =====================================================
-
-    result.sort(
+    forecast.sort(
         key=lambda x:
             x["time"]
     )
 
+    return forecast[:48]
 
-    # =====================================================
-    # ONLY FUTURE HOURS
-    # =====================================================
+
+# =========================================================
+# FIND CURRENT MODEL TEMPERATURE
+# =========================================================
+
+def current_model_values(
+    model_results
+):
 
     now = datetime.now(
-        EASTERN
+        timezone.utc
     )
 
-    # Next complete hour.
-    next_hour = (
-        now.replace(
-            minute=0,
-            second=0,
-            microsecond=0
+    current_hour = now.replace(
+        minute=0,
+        second=0,
+        microsecond=0
+    )
+
+    target = hour_key(
+        current_hour
+    )
+
+    values = {}
+
+    for model_name, model in (
+        model_results.items()
+    ):
+
+        best = None
+        best_difference = None
+
+        for point in model.get(
+            "data",
+            []
+        ):
+
+            dt = parse_iso(
+                point.get("time")
+            )
+
+            if dt is None:
+                continue
+
+            difference = abs(
+                (
+                    dt -
+                    current_hour
+                ).total_seconds()
+            )
+
+            # Only accept a model hour
+            # within 90 minutes.
+
+            if difference > 5400:
+                continue
+
+            if (
+                best_difference is None
+                or difference <
+                best_difference
+            ):
+
+                best_difference = (
+                    difference
+                )
+
+                best = point.get(
+                    "temperature"
+                )
+
+        if best is not None:
+
+            values[model_name] = (
+                round_temp(best)
+            )
+
+    return {
+
+        "timestamp":
+            target,
+
+        "models":
+            values
+
+    }
+
+
+# =========================================================
+# MODEL ERROR VS ACTUAL
+# =========================================================
+
+def calculate_current_errors(
+    model_values,
+    actual_temperature
+):
+
+    if actual_temperature is None:
+
+        return {}
+
+    result = {}
+
+    for name, value in (
+        model_values.items()
+    ):
+
+        if value is None:
+            continue
+
+        result[name] = {
+
+            "forecast":
+                round_temp(value),
+
+            "actual":
+                round_temp(
+                    actual_temperature
+                ),
+
+            "error":
+                round_temp(
+                    value -
+                    actual_temperature
+                ),
+
+            "absoluteError":
+                round_temp(
+                    abs(
+                        value -
+                        actual_temperature
+                    )
+                )
+
+        }
+
+    return result
+
+
+# =========================================================
+# NWS FORECAST DESCRIPTION
+# =========================================================
+
+def get_nws_descriptions(
+    nws
+):
+
+    descriptions = {}
+
+    for period in nws.get(
+        "forecast",
+        []
+    ):
+
+        timestamp = period.get(
+            "startTime"
         )
-        + timedelta(hours=1)
-    )
 
+        if not timestamp:
+            continue
 
-    filtered = []
-
-
-    for item in result:
-
-        dt = parse_datetime(
-            item["time"]
+        dt = parse_iso(
+            timestamp
         )
 
         if dt is None:
-
             continue
 
-        dt = dt.astimezone(
-            EASTERN
+        descriptions[
+            hour_key(dt)
+        ] = period.get(
+            "shortForecast",
+            ""
         )
 
-        if dt >= next_hour:
-
-            filtered.append(
-                item
-            )
-
-
-    # Exactly the next 24 available hours.
-    return filtered[:24]
+    return descriptions
 
 
 # =========================================================
-# MAIN WEATHER FUNCTION
+# WEATHER ENGINE
 # =========================================================
 
-def weather():
+def build_weather():
 
     errors = []
 
-
-    # =====================================================
-    # NWS
-    # =====================================================
+    # -----------------------------------------
+    # NWS / KNYC
+    # -----------------------------------------
 
     try:
 
@@ -1005,166 +911,204 @@ def weather():
 
         nws = {
 
-            "forecast": [],
-
-            "current": {},
-
-            "history": []
+            "actual": {},
+            "history": [],
+            "forecast": []
 
         }
 
         errors.append(
-            "NWS: " + str(e)
+            "NWS: " +
+            str(e)
         )
 
+    # -----------------------------------------
+    # Models
+    # -----------------------------------------
 
-    # =====================================================
-    # OPEN-METEO
-    # =====================================================
+    model_results, model_errors = (
+        get_all_models()
+    )
 
-    try:
+    errors.extend(
+        model_errors
+    )
 
-        open_meteo = (
-            get_open_meteo()
+    # -----------------------------------------
+    # Align
+    # -----------------------------------------
+
+    aligned = align_models(
+        model_results
+    )
+
+    consensus = calculate_consensus(
+        aligned
+    )
+
+    # -----------------------------------------
+    # Actual observation
+    # -----------------------------------------
+
+    actual = get_actual_conditions(
+        nws
+    )
+
+    actual_temperature = actual.get(
+        "temperatureF"
+    )
+
+    # -----------------------------------------
+    # Current model temperatures
+    # -----------------------------------------
+
+    current_models = (
+        current_model_values(
+            model_results
+        )
+    )
+
+    current_model_temps = (
+        current_models["models"]
+    )
+
+    # -----------------------------------------
+    # Current model consensus
+    # -----------------------------------------
+
+    current_values = list(
+        current_model_temps.values()
+    )
+
+    if current_values:
+
+        current_consensus = (
+            round_temp(
+                statistics.median(
+                    current_values
+                )
+            )
         )
 
-    except Exception as e:
+    else:
 
-        open_meteo = None
+        current_consensus = None
 
-        errors.append(
-            "Open-Meteo: " + str(e)
+    # -----------------------------------------
+    # Current model errors
+    # -----------------------------------------
+
+    current_errors = (
+        calculate_current_errors(
+            current_model_temps,
+            actual_temperature
         )
+    )
 
+    # -----------------------------------------
+    # NWS descriptions
+    # -----------------------------------------
 
-    # =====================================================
-    # WEATHERAPI
-    # =====================================================
-
-    try:
-
-        weatherapi = (
-            get_weatherapi()
-        )
-
-    except Exception as e:
-
-        weatherapi = None
-
-        errors.append(
-            "WeatherAPI: " + str(e)
-        )
-
-
-    # =====================================================
-    # CURRENT
-    # =====================================================
-
-    nws_current = (
-        get_nws_current(
+    descriptions = (
+        get_nws_descriptions(
             nws
         )
     )
 
-    open_meteo_current = (
-        get_open_meteo_current(
-            open_meteo
+    for point in consensus:
+
+        point["description"] = (
+            descriptions.get(
+                point["time"],
+                "Model forecast"
+            )
         )
+
+    # -----------------------------------------
+    # Providers / models
+    # -----------------------------------------
+
+    providers = {}
+
+    for name in (
+        "ECMWF IFS",
+        "ECMWF AIFS",
+        "GFS",
+        "HRRR",
+        "NBM",
+        "NAM"
+    ):
+
+        providers[name] = (
+            name in model_results
+        )
+
+    providers["KNYC Actual"] = (
+        actual_temperature is not None
     )
 
-    weatherapi_current = (
-        get_weatherapi_current(
-            weatherapi
-        )
-    )
-
-
-    current_consensus = (
-        build_current_consensus(
-            nws_current,
-            open_meteo_current,
-            weatherapi_current
-        )
-    )
-
-
-    # =====================================================
-    # RETURN
-    # =====================================================
+    # -----------------------------------------
+    # Final result
+    # -----------------------------------------
 
     return {
 
         "station":
-            "KNYC",
+            STATION,
 
-        "location": {
+        "location":
+            LOCATION_NAME,
 
-            "name":
-                "Central Park",
+        "coordinates": {
 
             "latitude":
                 LAT,
 
             "longitude":
-                LON,
-
-            "timezone":
-                TIMEZONE
+                LON
 
         },
 
         "fetchedAt":
             time.time() * 1000,
 
+        "actual":
+            actual,
 
-        "current": {
+        "sixHour":
+            get_six_hour_extremes(
+                nws
+            ),
+
+        "currentModels": {
+
+            "timestamp":
+                current_models[
+                    "timestamp"
+                ],
+
+            "temperatures":
+                current_model_temps,
 
             "consensus":
                 current_consensus,
 
-            "NWS":
-                nws_current,
+            "actual":
+                actual_temperature,
 
-            "Open-Meteo":
-                open_meteo_current,
-
-            "WeatherAPI":
-                weatherapi_current
+            "errors":
+                current_errors
 
         },
-
-
-        "sixHour":
-            six_hour_extremes(
-                nws
-            ),
-
 
         "forecast":
-            build_forecast(
-                nws,
-                open_meteo,
-                weatherapi
-            ),
+            consensus,
 
+        "providers":
+            providers,
 
-        "providers": {
-
-            "NWS":
-                bool(
-                    nws.get(
-                        "forecast"
-                    )
-                ),
-
-            "Open-Meteo":
-                open_meteo is not None,
-
-            "WeatherAPI":
-                weatherapi is not None
-
-        },
-
+        "modelCount":
+            len(model_results),
 
         "errors":
             errors
@@ -1188,7 +1132,9 @@ HTML = r'''
 <meta name="viewport"
       content="width=device-width,initial-scale=1">
 
-<title>Central Park Weather</title>
+<title>
+Central Park Weather
+</title>
 
 <style>
 
@@ -1200,9 +1146,11 @@ body {
 
     margin: 0;
 
-    background: #0d0f12;
+    background:
+        #0d0f12;
 
-    color: white;
+    color:
+        white;
 
     font-family:
         -apple-system,
@@ -1210,381 +1158,476 @@ body {
         "Segoe UI",
         Arial,
         sans-serif;
-
 }
 
 .container {
 
-    max-width: 700px;
+    max-width:
+        760px;
 
-    margin: auto;
+    margin:
+        auto;
 
-    padding: 16px;
-
+    padding:
+        16px;
 }
 
 h1 {
 
-    margin: 5px 0;
+    margin:
+        5px 0;
 
-    font-size: 29px;
-
+    font-size:
+        29px;
 }
 
 .subtitle {
 
-    color: #858b95;
+    color:
+        #858b95;
 
-    margin-bottom: 18px;
-
+    margin-bottom:
+        18px;
 }
 
 .card {
 
-    background: #171a1f;
+    background:
+        #171a1f;
 
-    border: 1px solid #292d34;
+    border:
+        1px solid #292d34;
 
-    border-radius: 18px;
+    border-radius:
+        18px;
 
-    padding: 18px;
+    padding:
+        18px;
 
-    margin-bottom: 15px;
-
+    margin-bottom:
+        15px;
 }
 
 .title {
 
-    font-size: 19px;
+    font-size:
+        20px;
 
-    font-weight: 700;
+    font-weight:
+        700;
 
-    margin-bottom: 15px;
-
+    margin-bottom:
+        15px;
 }
 
 .current {
 
-    text-align: center;
+    text-align:
+        center;
 
-    padding: 28px 15px;
-
+    padding:
+        25px 15px;
 }
 
 .label {
 
-    color: #888f99;
+    color:
+        #888f99;
 
-    font-size: 12px;
+    font-size:
+        12px;
 
-    letter-spacing: 1px;
-
+    letter-spacing:
+        1px;
 }
 
 .temperature {
 
-    font-size: 58px;
+    font-size:
+        62px;
 
-    font-weight: 700;
+    font-weight:
+        700;
 
-    margin: 8px 0;
-
+    margin:
+        8px 0;
 }
 
 .description {
 
-    color: #c5cad1;
+    color:
+        #c5cad1;
 
-    font-size: 18px;
-
+    font-size:
+        18px;
 }
 
 .updated {
 
-    color: #707782;
+    color:
+        #707782;
 
-    font-size: 12px;
+    font-size:
+        12px;
 
-    margin-top: 8px;
-
+    margin-top:
+        8px;
 }
 
+.consensus {
 
-/* CURRENT SOURCES */
+    text-align:
+        center;
+
+    background:
+        #20242a;
+
+    border-radius:
+        16px;
+
+    padding:
+        18px;
+
+    margin-bottom:
+        14px;
+}
+
+.consensus-number {
+
+    font-size:
+        48px;
+
+    font-weight:
+        700;
+}
 
 .consensus-label {
 
-    color: #888f99;
+    color:
+        #9299a4;
 
-    font-size: 12px;
+    font-size:
+        12px;
 
-    letter-spacing: 1px;
-
-    margin-top: 22px;
-
+    letter-spacing:
+        1px;
 }
 
-.source-grid {
+.actual {
 
-    display: grid;
+    text-align:
+        center;
 
-    grid-template-columns:
-        1fr 1fr 1fr;
+    padding:
+        15px;
 
-    gap: 8px;
+    border-radius:
+        14px;
 
-    margin-top: 15px;
-
+    background:
+        #20242a;
 }
 
-.source-temp {
+.actual-number {
 
-    background: #20242a;
+    font-size:
+        34px;
 
-    border-radius: 12px;
-
-    padding: 11px;
-
+    font-weight:
+        700;
 }
 
-.source-name {
+.model-grid {
 
-    color: #858b95;
-
-    font-size: 11px;
-
-    margin-bottom: 5px;
-
-}
-
-.source-value {
-
-    font-size: 20px;
-
-    font-weight: 700;
-
-}
-
-.source-time {
-
-    color: #707782;
-
-    font-size: 10px;
-
-    margin-top: 4px;
-
-}
-
-
-/* STATS */
-
-.grid {
-
-    display: grid;
+    display:
+        grid;
 
     grid-template-columns:
         1fr 1fr;
 
-    gap: 12px;
-
+    gap:
+        10px;
 }
 
-.stat {
+.model {
 
-    background: #20242a;
+    background:
+        #20242a;
 
-    border-radius: 14px;
+    border-radius:
+        14px;
 
-    padding: 15px;
-
+    padding:
+        14px;
 }
 
-.stat-value {
+.model-name {
 
-    font-size: 25px;
+    color:
+        #aeb4bd;
 
-    font-weight: 700;
+    font-size:
+        13px;
 
+    margin-bottom:
+        5px;
 }
 
-.stat-time {
+.model-temp {
 
-    color: #777e88;
+    font-size:
+        25px;
 
-    font-size: 13px;
-
-    margin-top: 5px;
-
+    font-weight:
+        700;
 }
 
+.model-error {
 
-/* PROVIDERS */
+    color:
+        #777f89;
 
-.sources {
+    font-size:
+        11px;
 
-    display: flex;
+    margin-top:
+        5px;
+}
 
-    flex-wrap: wrap;
+.source-list {
 
-    gap: 7px;
+    display:
+        flex;
 
+    flex-wrap:
+        wrap;
+
+    gap:
+        7px;
 }
 
 .source {
 
-    background: #20242a;
+    background:
+        #20242a;
 
-    border: 1px solid #30353d;
+    border:
+        1px solid #30353d;
 
-    border-radius: 9px;
+    border-radius:
+        9px;
 
-    padding: 7px 10px;
+    padding:
+        7px 10px;
 
-    color: #cbd0d7;
+    color:
+        #cbd0d7;
 
-    font-size: 13px;
-
+    font-size:
+        12px;
 }
-
-
-/* FORECAST */
 
 .hour {
 
-    padding: 14px 0;
+    padding:
+        14px 0;
 
     border-bottom:
         1px solid #292d34;
-
 }
 
 .hour:last-child {
 
-    border-bottom: 0;
-
+    border-bottom:
+        0;
 }
 
 .hour-main {
 
-    display: grid;
+    display:
+        grid;
 
     grid-template-columns:
-        23% 22% 38% 17%;
+        23% 22% 35% 20%;
 
-    align-items: center;
-
+    align-items:
+        center;
 }
 
 .hour-time {
 
-    font-weight: 600;
+    font-weight:
+        600;
 
-    color: #c8ccd3;
-
+    color:
+        #c8ccd3;
 }
 
 .hour-temp {
 
-    font-size: 19px;
+    font-size:
+        19px;
 
-    font-weight: 700;
-
+    font-weight:
+        700;
 }
 
 .hour-weather {
 
-    color: #aeb4bd;
+    color:
+        #aeb4bd;
 
-    font-size: 13px;
-
+    font-size:
+        13px;
 }
 
 .hour-count {
 
-    text-align: right;
+    text-align:
+        right;
 
-    color: #70b8ff;
+    color:
+        #70b8ff;
 
-    font-size: 11px;
-
+    font-size:
+        11px;
 }
 
 .provider-values {
 
-    margin-top: 7px;
+    margin-top:
+        7px;
 
-    color: #737a85;
+    color:
+        #737a85;
 
-    font-size: 11px;
+    font-size:
+        11px;
 
+    line-height:
+        1.6;
 }
 
+.stat-grid {
 
-/* BUTTON */
+    display:
+        grid;
+
+    grid-template-columns:
+        1fr 1fr;
+
+    gap:
+        12px;
+}
+
+.stat {
+
+    background:
+        #20242a;
+
+    border-radius:
+        14px;
+
+    padding:
+        15px;
+}
+
+.stat-value {
+
+    font-size:
+        25px;
+
+    font-weight:
+        700;
+}
+
+.stat-time {
+
+    color:
+        #777e88;
+
+    font-size:
+        13px;
+
+    margin-top:
+        5px;
+}
 
 button {
 
-    width: 100%;
+    width:
+        100%;
 
-    border: 0;
+    border:
+        0;
 
-    border-radius: 13px;
+    border-radius:
+        13px;
 
-    padding: 14px;
+    padding:
+        14px;
 
-    background: white;
+    background:
+        white;
 
-    color: #111;
+    color:
+        #111;
 
-    font-size: 15px;
+    font-size:
+        15px;
 
-    font-weight: 700;
-
+    font-weight:
+        700;
 }
-
-
-/* ERROR */
 
 .error {
 
-    display: none;
+    display:
+        none;
 
-    background: #351b1e;
+    background:
+        #351b1e;
 
-    border: 1px solid #633137;
+    border:
+        1px solid #633137;
 
-    color: #ffb9bf;
+    color:
+        #ffb9bf;
 
-    padding: 13px;
+    padding:
+        13px;
 
-    border-radius: 13px;
+    border-radius:
+        13px;
 
-    margin-bottom: 15px;
-
+    margin-bottom:
+        15px;
 }
-
-
-/* MOBILE */
 
 @media(max-width:500px) {
 
     .temperature {
 
-        font-size: 52px;
-
+        font-size:
+            55px;
     }
 
-    .source-grid {
+    .hour-main {
 
         grid-template-columns:
-            1fr 1fr;
-
+            23% 22% 35% 20%;
     }
 
     .hour-weather {
 
-        font-size: 11px;
+        font-size:
+            11px;
+    }
 
+    .model-grid {
+
+        grid-template-columns:
+            1fr 1fr;
     }
 
 }
@@ -1603,7 +1646,6 @@ button {
 Central Park Weather
 </h1>
 
-
 <div class="subtitle">
 KNYC • Central Park, New York
 </div>
@@ -1614,67 +1656,81 @@ KNYC • Central Park, New York
 </div>
 
 
-<!-- =====================================================
-     CURRENT
-===================================================== -->
-
-<div class="card current">
-
-<div class="label">
-CURRENT CONSENSUS TEMPERATURE
-</div>
-
-
-<div id="consensusTemp"
-     class="temperature">
-
---.-°F
-
-</div>
-
-
-<div id="description"
-     class="description">
-
-Loading...
-
-</div>
-
-
-<div id="updated"
-     class="updated">
-
-Updating...
-
-</div>
-
-
-<div class="consensus-label">
-CURRENT SOURCE TEMPERATURES
-</div>
-
-
-<div id="currentSources"
-     class="source-grid">
-</div>
-
-
-</div>
-
-
-<!-- =====================================================
-     CONDITIONS
-===================================================== -->
+<!-- ================================================= -->
+<!-- MODEL CONSENSUS -->
+<!-- ================================================= -->
 
 <div class="card">
 
 <div class="title">
-Current Conditions
+Model Consensus
 </div>
 
 
-<div class="grid">
+<div class="consensus">
 
+<div class="consensus-label">
+SIX-MODEL TEMPERATURE CONSENSUS
+</div>
+
+<div id="consensus"
+     class="consensus-number">
+--.-°F
+</div>
+
+</div>
+
+
+<div class="actual">
+
+<div class="consensus-label">
+ACTUAL KNYC OBSERVATION
+</div>
+
+<div id="actual"
+     class="actual-number">
+--.-°F
+</div>
+
+<div id="actualTime"
+     class="stat-time">
+--
+</div>
+
+</div>
+
+</div>
+
+
+<!-- ================================================= -->
+<!-- SIX MODELS -->
+<!-- ================================================= -->
+
+<div class="card">
+
+<div class="title">
+Current Model Temperatures
+</div>
+
+<div id="models"
+     class="model-grid">
+
+</div>
+
+</div>
+
+
+<!-- ================================================= -->
+<!-- CURRENT CONDITIONS -->
+<!-- ================================================= -->
+
+<div class="card">
+
+<div class="title">
+Actual KNYC Conditions
+</div>
+
+<div class="stat-grid">
 
 <div class="stat">
 
@@ -1684,9 +1740,7 @@ HUMIDITY
 
 <div id="humidity"
      class="stat-value">
-
 --%
-
 </div>
 
 </div>
@@ -1700,51 +1754,42 @@ WIND
 
 <div id="wind"
      class="stat-value">
-
 --.- mph
+</div>
+
+</div>
 
 </div>
 
 </div>
 
 
-</div>
-
-</div>
-
-
-<!-- =====================================================
-     SIX HOURS
-===================================================== -->
+<!-- ================================================= -->
+<!-- PAST SIX HOURS -->
+<!-- ================================================= -->
 
 <div class="card">
 
 <div class="title">
-Past 6 Hours
+Past 6 Hours — KNYC
 </div>
 
-
-<div class="grid">
-
+<div class="stat-grid">
 
 <div class="stat">
 
 <div class="label">
-PEAK TEMPERATURE
+PEAK
 </div>
 
 <div id="high"
      class="stat-value">
-
 --.-°F
-
 </div>
 
 <div id="highTime"
      class="stat-time">
-
 --
-
 </div>
 
 </div>
@@ -1753,55 +1798,47 @@ PEAK TEMPERATURE
 <div class="stat">
 
 <div class="label">
-LOWEST TEMPERATURE
+LOWEST
 </div>
 
 <div id="low"
      class="stat-value">
-
 --.-°F
-
 </div>
 
 <div id="lowTime"
      class="stat-time">
-
 --
+</div>
+
+</div>
 
 </div>
 
 </div>
 
 
-</div>
-
-</div>
-
-
-<!-- =====================================================
-     PROVIDERS
-===================================================== -->
+<!-- ================================================= -->
+<!-- SOURCES -->
+<!-- ================================================= -->
 
 <div class="card">
 
 <div class="title">
-Forecast Sources
+Models Available
 </div>
-
 
 <div id="sources"
-     class="sources">
-
-Loading...
+     class="source-list">
 
 </div>
 
 </div>
 
 
-<!-- =====================================================
-     NEXT 24 HOURS
-===================================================== -->
+<!-- ================================================= -->
+<!-- NEXT 24 HOURS -->
+<!-- ================================================= -->
 
 <div class="card">
 
@@ -1809,18 +1846,9 @@ Loading...
 Next 24 Hours
 </div>
 
-
 <div id="forecast">
 
-<div style="
-color:#777e88;
-text-align:center;
-padding:20px;
-">
-
-Loading forecast...
-
-</div>
+Loading...
 
 </div>
 
@@ -1838,10 +1866,6 @@ Refresh Weather
 <script>
 
 
-// =========================================================
-// LOAD
-// =========================================================
-
 async function loadWeather() {
 
     const error =
@@ -1849,10 +1873,8 @@ async function loadWeather() {
             "error"
         );
 
-
     error.style.display =
         "none";
-
 
     try {
 
@@ -1866,61 +1888,53 @@ async function loadWeather() {
                 }
             );
 
-
         if (!response.ok) {
 
             throw new Error(
                 "Server returned " +
                 response.status
             );
-
         }
-
 
         const data =
             await response.json();
 
-
         showWeather(data);
 
+    }
 
-    } catch (e) {
+    catch (e) {
 
         console.error(e);
-
 
         error.textContent =
             "Weather update failed: " +
             e.message;
 
-
         error.style.display =
             "block";
-
     }
-
 }
 
 
-// =========================================================
-// TIME
-// =========================================================
-
-function time(value) {
+function formatTime(
+    value
+) {
 
     if (!value)
         return "--";
 
-
-    const d =
+    const date =
         new Date(value);
 
-
-    if (isNaN(d.getTime()))
+    if (
+        isNaN(
+            date.getTime()
+        )
+    )
         return "--";
 
-
-    return d.toLocaleTimeString(
+    return date.toLocaleTimeString(
         [],
         {
             hour:
@@ -1930,313 +1944,246 @@ function time(value) {
                 "2-digit"
         }
     );
-
 }
 
 
-// =========================================================
-// TEMPERATURE
-// =========================================================
-
-function temp(value) {
-
-    if (value == null)
-        return "--.-°F";
-
-
-    return Number(value)
-        .toFixed(1)
-        + "°F";
-
-}
-
-
-// =========================================================
-// SOURCE CARD
-// =========================================================
-
-function sourceCard(
-    name,
-    source
+function formatTemp(
+    value
 ) {
 
-    const div =
-        document.createElement(
-            "div"
-        );
-
-
-    div.className =
-        "source-temp";
-
-
-    let value =
-        "--.-°F";
-
-
     if (
-        source &&
-        source.temperatureF != null
-    ) {
+        value === null ||
+        value === undefined
+    )
+        return "--.-°F";
 
-        value =
-            temp(
-                source.temperatureF
-            );
-
-    }
-
-
-    let sourceTime =
-        "--";
-
-
-    if (
-        source &&
-        source.time
-    ) {
-
-        sourceTime =
-            time(
-                source.time
-            );
-
-    }
-
-
-    div.innerHTML = `
-
-        <div class="source-name">
-            ${name}
-        </div>
-
-        <div class="source-value">
-            ${value}
-        </div>
-
-        <div class="source-time">
-            ${sourceTime}
-        </div>
-
-    `;
-
-
-    return div;
-
+    return (
+        Number(value)
+        .toFixed(1)
+        +
+        "°F"
+    );
 }
 
 
-// =========================================================
-// DISPLAY
-// =========================================================
+function showWeather(
+    data
+) {
 
-function showWeather(data) {
+    const actual =
+        data.actual || {};
 
-
-    const current =
-        data.current || {};
-
-
-    const consensus =
-        current.consensus || {};
+    const currentModels =
+        data.currentModels || {};
 
 
-    // -----------------------------------------------------
+    // ==========================================
     // CONSENSUS
-    // -----------------------------------------------------
+    // ==========================================
 
     document.getElementById(
-        "consensusTemp"
+        "consensus"
     ).textContent =
-        temp(
-            consensus.temperatureF
+        formatTemp(
+            currentModels.consensus
         );
 
 
-    // -----------------------------------------------------
-    // DESCRIPTION
-    // -----------------------------------------------------
-
-    let description =
-        "Conditions unavailable";
-
-
-    if (
-        current.NWS &&
-        current.NWS.description
-    ) {
-
-        description =
-            current.NWS.description;
-
-    } else if (
-        current.WeatherAPI &&
-        current.WeatherAPI.description
-    ) {
-
-        description =
-            current.WeatherAPI.description;
-
-    }
-
+    // ==========================================
+    // ACTUAL KNYC
+    // ==========================================
 
     document.getElementById(
-        "description"
+        "actual"
     ).textContent =
-        description;
-
-
-    // -----------------------------------------------------
-    // UPDATED
-    // -----------------------------------------------------
+        formatTemp(
+            currentModels.actual
+        );
 
     document.getElementById(
-        "updated"
+        "actualTime"
     ).textContent =
-        "Updated " +
-        time(
-            data.fetchedAt
-        ) +
-        " • " +
-        (
-            consensus.sourceCount || 0
-        ) +
-        " current sources";
-
-
-    // -----------------------------------------------------
-    // CURRENT SOURCES
-    // -----------------------------------------------------
-
-    const currentSources =
-        document.getElementById(
-            "currentSources"
+        "Observed " +
+        formatTime(
+            actual.timestamp
         );
 
 
-    currentSources.innerHTML =
-        "";
-
-
-    currentSources.appendChild(
-        sourceCard(
-            "NWS",
-            current.NWS
-        )
-    );
-
-
-    currentSources.appendChild(
-        sourceCard(
-            "Open-Meteo",
-            current["Open-Meteo"]
-        )
-    );
-
-
-    currentSources.appendChild(
-        sourceCard(
-            "WeatherAPI",
-            current.WeatherAPI
-        )
-    );
-
-
-    // -----------------------------------------------------
+    // ==========================================
     // HUMIDITY
-    // -----------------------------------------------------
-
-    let humidity = null;
-
+    // ==========================================
 
     if (
-        current.NWS &&
-        current.NWS.humidity != null
+        actual.humidity !== null &&
+        actual.humidity !== undefined
     ) {
-
-        humidity =
-            current.NWS.humidity;
-
-    } else if (
-        current["Open-Meteo"] &&
-        current["Open-Meteo"].humidity != null
-    ) {
-
-        humidity =
-            current["Open-Meteo"].humidity;
-
-    } else if (
-        current.WeatherAPI &&
-        current.WeatherAPI.humidity != null
-    ) {
-
-        humidity =
-            current.WeatherAPI.humidity;
-
-    }
-
-
-    if (humidity != null) {
 
         document.getElementById(
             "humidity"
         ).textContent =
-            Number(humidity)
-            .toFixed(0) +
+            Number(
+                actual.humidity
+            ).toFixed(0) +
             "%";
-
     }
 
 
-    // -----------------------------------------------------
+    // ==========================================
     // WIND
-    // -----------------------------------------------------
-
-    let wind = null;
-
+    // ==========================================
 
     if (
-        current.NWS &&
-        current.NWS.windMph != null
+        actual.windMph !== null &&
+        actual.windMph !== undefined
     ) {
-
-        wind =
-            current.NWS.windMph;
-
-    } else if (
-        current["Open-Meteo"] &&
-        current["Open-Meteo"].windMph != null
-    ) {
-
-        wind =
-            current["Open-Meteo"].windMph;
-
-    } else if (
-        current.WeatherAPI &&
-        current.WeatherAPI.windMph != null
-    ) {
-
-        wind =
-            current.WeatherAPI.windMph;
-
-    }
-
-
-    if (wind != null) {
 
         document.getElementById(
             "wind"
         ).textContent =
-            Number(wind)
-            .toFixed(1) +
+            Number(
+                actual.windMph
+            ).toFixed(1) +
             " mph";
-
     }
 
 
-    // -----------------------------------------------------
-    // SIX-HOUR HIGH
-    // -----------------------------------------------------
+    // ==========================================
+    // MODELS
+    // ==========================================
+
+    const modelBox =
+        document.getElementById(
+            "models"
+        );
+
+    modelBox.innerHTML = "";
+
+
+    const modelTemps =
+        currentModels.temperatures || {};
+
+    const modelErrors =
+        currentModels.errors || {};
+
+
+    Object.entries(
+        modelTemps
+    ).forEach(
+        ([name, temperature]) => {
+
+            const div =
+                document.createElement(
+                    "div"
+                );
+
+            div.className =
+                "model";
+
+
+            let errorText = "";
+
+            if (
+                modelErrors[name]
+            ) {
+
+                const error =
+                    modelErrors[name].error;
+
+                if (error > 0) {
+
+                    errorText =
+                        "+" +
+                        error.toFixed(1) +
+                        "°F vs actual";
+
+                }
+                else {
+
+                    errorText =
+                        error.toFixed(1) +
+                        "°F vs actual";
+                }
+            }
+
+
+            div.innerHTML = `
+
+<div class="model-name">
+${name}
+</div>
+
+<div class="model-temp">
+${formatTemp(temperature)}
+</div>
+
+<div class="model-error">
+${errorText}
+</div>
+
+`;
+
+            modelBox.appendChild(
+                div
+            );
+
+        }
+    );
+
+
+    // ==========================================
+    // SOURCES
+    // ==========================================
+
+    const sourceBox =
+        document.getElementById(
+            "sources"
+        );
+
+    sourceBox.innerHTML = "";
+
+
+    Object.entries(
+        data.providers || {}
+    ).forEach(
+        ([name, active]) => {
+
+            if (!active)
+                return;
+
+            const span =
+                document.createElement(
+                    "span"
+                );
+
+            span.className =
+                "source";
+
+            if (
+                name ===
+                "KNYC Actual"
+            ) {
+
+                span.textContent =
+                    "✓ " + name;
+
+            }
+            else {
+
+                span.textContent =
+                    "✓ " + name;
+            }
+
+            sourceBox.appendChild(
+                span
+            );
+
+        }
+    );
+
+
+    // ==========================================
+    // SIX HOUR
+    // ==========================================
 
     if (
         data.sixHour &&
@@ -2246,24 +2193,18 @@ function showWeather(data) {
         document.getElementById(
             "high"
         ).textContent =
-            temp(
+            formatTemp(
                 data.sixHour.high.temperature
             );
-
 
         document.getElementById(
             "highTime"
         ).textContent =
-            time(
-                data.sixHour.high.time
+            formatTime(
+                data.sixHour.high.timestamp
             );
-
     }
 
-
-    // -----------------------------------------------------
-    // SIX-HOUR LOW
-    // -----------------------------------------------------
 
     if (
         data.sixHour &&
@@ -2273,123 +2214,59 @@ function showWeather(data) {
         document.getElementById(
             "low"
         ).textContent =
-            temp(
+            formatTemp(
                 data.sixHour.low.temperature
             );
-
 
         document.getElementById(
             "lowTime"
         ).textContent =
-            time(
-                data.sixHour.low.time
+            formatTime(
+                data.sixHour.low.timestamp
             );
-
     }
 
 
-    // -----------------------------------------------------
-    // PROVIDERS
-    // -----------------------------------------------------
-
-    const providers =
-        document.getElementById(
-            "sources"
-        );
-
-
-    providers.innerHTML =
-        "";
-
-
-    let providerCount =
-        0;
-
-
-    Object.entries(
-        data.providers || {}
-    ).forEach(
-        ([name, active]) => {
-
-
-            if (!active)
-                return;
-
-
-            providerCount++;
-
-
-            const span =
-                document.createElement(
-                    "span"
-                );
-
-
-            span.className =
-                "source";
-
-
-            span.textContent =
-                "✓ " + name;
-
-
-            providers.appendChild(
-                span
-            );
-
-        }
-    );
-
-
-    if (providerCount === 0) {
-
-        providers.textContent =
-            "No forecast providers available";
-
-    }
-
-
-    // -----------------------------------------------------
+    // ==========================================
     // FORECAST
-    // -----------------------------------------------------
+    // ==========================================
 
-    const forecast =
+    const forecastBox =
         document.getElementById(
             "forecast"
         );
 
-
-    forecast.innerHTML =
-        "";
+    forecastBox.innerHTML = "";
 
 
     (
         data.forecast || []
     )
-    .slice(0, 24)
+    .slice(
+        0,
+        24
+    )
     .forEach(
-        p => {
-
+        point => {
 
             const row =
                 document.createElement(
                     "div"
                 );
 
-
             row.className =
                 "hour";
 
 
-            let providerValues =
-                "";
+            let values = "";
 
+            if (
+                point.sources
+            ) {
 
-            if (p.sources) {
-
-                providerValues =
+                values =
                     Object.entries(
-                        p.sources
+                        point.sources
                     )
                     .map(
                         ([name, value]) =>
@@ -2402,41 +2279,39 @@ function showWeather(data) {
                     .join(
                         " • "
                     );
-
             }
 
 
             row.innerHTML = `
 
-                <div class="hour-main">
+<div class="hour-main">
 
-                    <div class="hour-time">
-                        ${time(p.time)}
-                    </div>
+<div class="hour-time">
+${formatTime(point.time)}
+</div>
 
-                    <div class="hour-temp">
-                        ${temp(p.temperature)}
-                    </div>
+<div class="hour-temp">
+${formatTemp(point.consensus)}
+</div>
 
-                    <div class="hour-weather">
-                        ${p.shortForecast || "Consensus"}
-                    </div>
+<div class="hour-weather">
+${point.description || ""}
+</div>
 
-                    <div class="hour-count">
-                        ${p.sourceCount || 0}
-                        source${p.sourceCount == 1 ? "" : "s"}
-                    </div>
+<div class="hour-count">
+${point.sourceCount}
+models
+</div>
 
-                </div>
+</div>
 
-                <div class="provider-values">
-                    ${providerValues}
-                </div>
+<div class="provider-values">
+${values}
+</div>
 
-            `;
+`;
 
-
-            forecast.appendChild(
+            forecastBox.appendChild(
                 row
             );
 
@@ -2446,16 +2321,8 @@ function showWeather(data) {
 }
 
 
-// =========================================================
-// INITIAL LOAD
-// =========================================================
-
 loadWeather();
 
-
-// =========================================================
-// REFRESH EVERY 5 MINUTES
-// =========================================================
 
 setInterval(
     loadWeather,
@@ -2478,19 +2345,27 @@ class Handler(
     BaseHTTPRequestHandler
 ):
 
-
     def do_GET(self):
 
         try:
 
+            path =
+                urlparse(
+                    self.path
+                ).path
 
-            if self.path.startswith(
-                "/api/weather"
-            ):
+            # ---------------------------------
+            # API
+            # ---------------------------------
 
-                data = json.dumps(
-                    weather()
-                ).encode()
+            if path == "/api/weather":
+
+                data =
+                    json.dumps(
+                        build_weather()
+                    ).encode(
+                        "utf-8"
+                    )
 
                 self.send_response(
                     200
@@ -2501,12 +2376,16 @@ class Handler(
                     "application/json"
                 )
 
+            # ---------------------------------
+            # WEBSITE
+            # ---------------------------------
 
             else:
 
-                data = HTML.encode(
-                    "utf-8"
-                )
+                data =
+                    HTML.encode(
+                        "utf-8"
+                    )
 
                 self.send_response(
                     200
@@ -2516,7 +2395,6 @@ class Handler(
                     "Content-Type",
                     "text/html; charset=utf-8"
                 )
-
 
             self.send_header(
                 "Cache-Control",
@@ -2528,22 +2406,31 @@ class Handler(
                 "no-cache"
             )
 
+            self.send_header(
+                "Expires",
+                "0"
+            )
+
             self.end_headers()
 
             self.wfile.write(
                 data
             )
 
-
         except Exception as e:
 
-            data = json.dumps({
+            print(
+                "SERVER ERROR:",
+                e
+            )
 
-                "error":
-                    str(e)
-
-            }).encode()
-
+            data =
+                json.dumps({
+                    "error":
+                        str(e)
+                }).encode(
+                    "utf-8"
+                )
 
             self.send_response(
                 500
@@ -2571,27 +2458,28 @@ class Handler(
 
 
 # =========================================================
-# START
+# START SERVER
 # =========================================================
 
-port = int(
+PORT = int(
     os.environ.get(
         "PORT",
         "10000"
     )
 )
 
-
 print(
     "Central Park Weather running on port",
-    port
+    PORT
 )
 
-
-server = ThreadingHTTPServer(
-    ("0.0.0.0", port),
-    Handler
-)
-
+server =
+    ThreadingHTTPServer(
+        (
+            "0.0.0.0",
+            PORT
+        ),
+        Handler
+    )
 
 server.serve_forever()
